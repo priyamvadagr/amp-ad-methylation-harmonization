@@ -1,0 +1,476 @@
+---
+title: "Reconcile Methylation Array Data Sample Info"
+subtitle: "Mapping samples between files and getting demographic info"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+mainfont: "DejaVu Sans"
+fontsize: 10pt
+header-includes:
+  - \usepackage{titlesec}
+  - \usepackage{xcolor}
+  - \definecolor{darkblue}{HTML}{00008B}
+  - \titleformat{\section}{\color{darkblue}\Large\bfseries}{\thesection}{1em}{}
+  - \titleformat{\subsection}{\color{darkblue}\large\bfseries}{\thesubsection}{1em}{}
+  - \titleformat{\subsubsection}{\color{darkblue}\normalsize\bfseries}{\thesubsubsection}{1em}{}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 12,
+  fig.height = 4,
+  fig.align  = "center"
+)
+# global plot theme so all ggplots inherit readable font sizes
+library(ggplot2)
+theme_set(theme_minimal(base_size = 14))
+```
+```{r libraries, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(ggVennDiagram)
+source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/Misc/harmonize_metadata.R")
+```
+```{r demographics-helper, include=FALSE}
+# Summarize the core harmonized demographic columns for one cohort.
+summarize_demographics <- function(df, cohort_name,
+                                    vars = c("sex","race","isHispanic","apoe4Status","Braak", "tissue"),
+                                    var_labels = c("Sex","Race","Hispanic Ethnicity","apoe4 Status","Braak Stage", "Specimen Tissue")) {
+  vars <- vars[vars %in% names(df)]
+
+  for (v in seq_along(vars)) {
+    v_name <- var_labels[v]
+    cat("\n", v_name, "\n\n")
+    tbl <- as.data.frame(table(df[[vars[v]]], useNA = "ifany"))
+    names(tbl) <- c(v_name, "Count")
+    print(kable(tbl))
+    cat("\n")
+  }
+
+  if ("ageDeath" %in% names(df)) {
+    age_numeric <- suppressWarnings(as.numeric(ifelse(df$ageDeath == "90+", "90", df$ageDeath)))
+    cat("\n Age at Death (numeric summary; '90+' top-coded to 90)\n\n")
+    age_summary <- summary(age_numeric)
+    age_tbl <- data.frame(Statistic = names(age_summary), Value = as.numeric(age_summary))
+    print(kable(age_tbl))
+    cat("\n")
+  }
+}
+
+# Venn diagram of metadata/IDAT overlap for one cohort.
+plot_overlap_venn <- function(metadata_samples, idat_samples, cohort_name) {
+  venn_list <- list("Metadata" = metadata_samples, "IDAT" = idat_samples)
+
+  ggVennDiagram(venn_list, label = "both", label_alpha = 0) +
+    scale_fill_gradient(low = "#eaf2fc", high = "#2a78d6") +
+    scale_x_continuous(expand = expansion(mult = 0.2)) +
+    labs(title = paste0(cohort_name, ": Metadata vs. IDAT File Overlap")) +
+    theme_void(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "none", plot.margin = unit(c(0.5, 15, 1, 5), "cm")) +
+    coord_cartesian(clip = "off") 
+}
+```
+# MSBB
+| Synapse ID | File name |
+|---|---|
+| syn21447661 | ROU_13169_B01_CUS_MethylEPIC.illumina.beta.txt |
+| syn52073071 | Raw data folder |
+| syn22157601 | MSBB_assay_MethylationArray_metadata.csv |
+| syn21893059 | MSBB_biospecimen_metadata.csv |
+| syn6101474 | MSBB_individual_metadata.csv |
+
+## Raw Data availability 
+```{r MSBB, echo = FALSE, results = 'hide'}
+msbb_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/MSBB'
+msbb_out_dir <- '/home/ec2-user/data/methyl_harmonization/MSBB/metadata/'
+dir.create(msbb_out_dir, recursive = T)
+msbb_meth_df <- read.table(file.path(msbb_dir,'metadata/MSBB_assay_MethylationArray_metadata.csv'), sep = ',', header = T)
+msbb_bio_df <- read.table(file.path(msbb_dir,'metadata/MSBB_biospecimen_metadata.csv'), sep = ',', header = T)
+#length(intersect(msbb_meth_df$specimenID, msbb_bio_df$specimenID)) #All 201 samples accounted for 
+msbb_ind_df <- read.table(file.path(msbb_dir,'metadata/MSBB_individual_metadata_harmonized.csv'), sep = ',', header = T)
+z <- msbb_bio_df[msbb_bio_df$specimenID %in% msbb_meth_df$specimenID & msbb_bio_df$exclude != TRUE,] #No samples flagged to be excluded 
+
+
+#map the specimenID to individualID and add covariate information 
+msbb_bio_df_subset <- msbb_bio_df[msbb_bio_df$specimenID %in% msbb_meth_df$specimenID,]  
+msbb_meth_df$individualID <- msbb_bio_df_subset$individualID[match(msbb_meth_df$specimenID, msbb_bio_df_subset$specimenID)]
+msbb_ind_df <- msbb_ind_df[msbb_ind_df$individualID %in% msbb_meth_df$individualID, ]
+
+
+#Add tissue info to methylation dataset
+msbb_meth_df$tissue <- msbb_bio_df_subset$tissue[match(msbb_meth_df$specimenID, msbb_bio_df_subset$specimenID)]
+
+#Add tissue info to individual metadata
+msbb_ind_df$tissue <- msbb_bio_df_subset$tissue[match(msbb_ind_df$individualID, msbb_bio_df_subset$individualID)]
+
+# Validate harmonization
+validate_harmonized(msbb_ind_df,"MSBB")
+
+# Check if green and red .idat files present for all samples
+msbb_grn_file_names <- list.files(file.path(msbb_dir, 'raw_data'), pattern = '_Grn\\.idat$', recursive = TRUE)
+msbb_red_file_names <- list.files(file.path(msbb_dir, 'raw_data'), pattern = '_Red\\.idat$', recursive = TRUE)
+
+msbb_grn_sample_names <- sub('_Grn\\.idat$', '', basename(msbb_grn_file_names))
+msbb_red_sample_names <- sub('_Red\\.idat$', '', basename(msbb_red_file_names))
+
+msbb_sample_names <- paste0(msbb_meth_df$Sentrix_ID, '_', msbb_meth_df$Sentrix_Row_Column)
+
+length(intersect(msbb_sample_names, msbb_grn_sample_names))
+length(intersect(msbb_sample_names, msbb_red_sample_names))
+
+length(unique(msbb_ind_df$individualID))
+
+# Samples with metadata but missing a Grn and/or Red IDAT file
+msbb_missing_idat <- union(
+  setdiff(msbb_sample_names, msbb_grn_sample_names),
+  setdiff(msbb_sample_names, msbb_red_sample_names)
+)
+
+# IDAT files present on disk with no matching metadata row
+msbb_missing_metadata <- union(
+  setdiff(msbb_grn_sample_names, msbb_sample_names),
+  setdiff(msbb_red_sample_names, msbb_sample_names)
+)
+
+cat(length(msbb_missing_idat), "sample(s) in metadata with no matching IDAT file(s):\n")
+print(msbb_missing_idat)
+
+cat(length(msbb_missing_metadata), "IDAT sample(s) on disk with no matching metadata row:\n")
+print(msbb_missing_metadata)
+
+msbb_idat_sample_names <- union(msbb_grn_sample_names, msbb_red_sample_names)
+plot_overlap_venn(msbb_sample_names, msbb_idat_sample_names, "MSBB")
+
+# Remove samples missing IDAT files before writing out and summarizing
+msbb_meth_df <- msbb_meth_df[!msbb_sample_names %in% msbb_missing_idat, ]
+msbb_ind_df <- msbb_ind_df[msbb_ind_df$individualID %in% msbb_meth_df$individualID, ]
+
+# Write out processed data
+write.table(msbb_ind_df, file = file.path(msbb_out_dir, 'MSBB_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+write.table(msbb_meth_df, file = file.path(msbb_out_dir, 'MSBB_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+```
+`r length(intersect(msbb_sample_names, msbb_grn_sample_names))` of `r length(msbb_sample_names)` Green IDAT files and `r length(intersect(msbb_sample_names, msbb_red_sample_names))` of `r length(msbb_sample_names)` Red IDAT files present for MSBB cohort.
+
+`r length(msbb_missing_idat)` sample(s) in the metadata have no matching IDAT file `r if (length(msbb_missing_idat)) paste0(':', " ", paste(msbb_missing_idat, collapse = ", ")) else ""`.
+
+`r length(msbb_missing_metadata)` IDAT sample(s) on disk have no matching metadata row: `r if (length(msbb_missing_metadata)) paste0(':', " ", paste(msbb_missing_metadata, collapse = ", ")) else ""`.
+
+## Demographics
+
+```{r MSBB-demographics, echo = FALSE, results = "asis"}
+summarize_demographics(msbb_ind_df, "MSBB")
+```
+
+# ROSMAP
+| Synapse ID | File name |
+|---|---|---|
+| syn3168763 | ROSMAP_arrayMethylation_imputed.tsv.gz | 
+| syn5850422 | ROSMAP_arrayMethylation_raw.gz | 
+| syn3168775 | ROSMAP_arrayMethylation_metaData.tsv | 
+| syn23569437 | ROSMAP_assay_methylationArray_metadata.csv | 
+| syn21323366 | ROSMAP_biospecimen_metadata.csv | 
+| syn3191087 | ROSMAP_clinical.csv | 
+
+## Raw Data availability 
+```{r ROSMAP, echo = FALSE, results = 'hide'}
+rosmap_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP'
+rosmap_out_dir <- '/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/'
+dir.create(rosmap_out_dir, recursive = T)
+rosmap_meth_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_assay_methylationArray_metadata.csv'), sep = ',', header = T)
+rosmap_bio_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_biospecimen_metadata.csv'), sep = ',', header = T)
+#length(intersect(rosmap_meth_df$specimenID, rosmap_bio_df$specimenID)) #All 748 samples accounted for 
+rosmap_ind_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_clinical_harmonized.csv'), sep = ',', header = T)
+x <- rosmap_bio_df[rosmap_bio_df$specimenID %in% rosmap_meth_df$specimenID & is.na(rosmap_bio_df$exclude),] #All samples have NA as exlude 
+
+#map the specimenID to individualID and add covariate information 
+rosmap_bio_df_subset <- rosmap_bio_df[rosmap_bio_df$specimenID %in% rosmap_meth_df$specimenID,]  
+rosmap_meth_df$individualID <- rosmap_bio_df_subset$individualID[match(rosmap_meth_df$specimenID, rosmap_bio_df_subset$specimenID)]
+rosmap_ind_df <- rosmap_ind_df[rosmap_ind_df$individualID %in% rosmap_meth_df$individualID, ]
+
+#Add tissue info to methylation dataset
+rosmap_meth_df$tissue <- rosmap_bio_df_subset$tissue[match(rosmap_meth_df$specimenID, rosmap_bio_df_subset$specimenID)]
+
+#Add tissue info to individual metadata
+rosmap_ind_df$tissue <- rosmap_bio_df_subset$tissue[match(rosmap_ind_df$individualID, rosmap_bio_df_subset$individualID)]
+
+# Check if green and red .idat files present for all samples
+# (idat files live in per-barcode subfolders, so list.files must recurse)
+rosmap_grn_file_names <- list.files(file.path(rosmap_dir, 'raw_data'), pattern = '_Grn\\.idat$', recursive = TRUE)
+rosmap_red_file_names <- list.files(file.path(rosmap_dir, 'raw_data'), pattern = '_Red\\.idat$', recursive = TRUE)
+
+rosmap_grn_sample_names <- sub('_Grn\\.idat$', '', basename(rosmap_grn_file_names))
+rosmap_red_sample_names <- sub('_Red\\.idat$', '', basename(rosmap_red_file_names))
+
+rosmap_sample_names <- paste0(rosmap_meth_df$Sentrix_ID, '_', rosmap_meth_df$Sentrix_Row_Column)
+
+length(intersect(rosmap_sample_names, rosmap_grn_sample_names))
+length(intersect(rosmap_sample_names, rosmap_red_sample_names))
+
+length(unique(rosmap_meth_df$Sentrix_ID))
+
+# Samples with metadata but missing a Grn and/or Red IDAT file
+rosmap_missing_idat <- union(
+  setdiff(rosmap_sample_names, rosmap_grn_sample_names),
+  setdiff(rosmap_sample_names, rosmap_red_sample_names)
+)
+
+# IDAT files present on disk with no matching metadata row
+rosmap_missing_metadata <- union(
+  setdiff(rosmap_grn_sample_names, rosmap_sample_names),
+  setdiff(rosmap_red_sample_names, rosmap_sample_names)
+)
+
+cat(length(rosmap_missing_idat), "sample(s) in metadata with no matching IDAT file(s):\n")
+print(rosmap_missing_idat)
+
+cat(length(rosmap_missing_metadata), "IDAT sample(s) on disk with no matching metadata row:\n")
+print(rosmap_missing_metadata)
+
+rosmap_idat_sample_names <- union(rosmap_grn_sample_names, rosmap_red_sample_names)
+plot_overlap_venn(rosmap_sample_names, rosmap_idat_sample_names, "ROSMAP")
+
+# Remove samples missing IDAT files before writing out and summarizing
+rosmap_meth_df <- rosmap_meth_df[!rosmap_sample_names %in% rosmap_missing_idat, ]
+rosmap_ind_df <- rosmap_ind_df[rosmap_ind_df$individualID %in% rosmap_meth_df$individualID, ]
+
+write.table(rosmap_ind_df, file = file.path(rosmap_out_dir, 'ROSMAP_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+write.table(rosmap_meth_df, file = file.path(rosmap_out_dir, 'ROSMAP_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+```
+`r length(intersect(rosmap_sample_names, rosmap_grn_sample_names))` of `r length(rosmap_sample_names)` Greenn IDAT files and `r length(intersect(rosmap_sample_names, rosmap_red_sample_names))` of `r length(rosmap_sample_names)` Red IDAT files present for ROSMAP cohort.
+
+`r length(rosmap_missing_idat)` sample(s) in the metadata have no matching IDAT file`r if (length(rosmap_missing_idat)) paste0(": ", paste(rosmap_missing_idat, collapse = ", ")) else ""`.
+
+`r length(rosmap_missing_metadata)` IDAT sample(s) on disk have no matching metadata row`r if (length(rosmap_missing_metadata)) paste0(": ", paste(rosmap_missing_metadata, collapse = ", ")) else ""`.
+
+## Demographics
+
+```{r ROSMAP-demographics, echo = FALSE, results = "asis"}
+summarize_demographics(rosmap_ind_df, "ROSMAP")
+```
+
+# ROSMAP APOE4
+| Synapse ID | File name | 
+|---|---|---|
+| syn26607959 | RR_APOE4_datMeth.csv | 
+| syn23633756 | DNA methylation Array raw data | 
+| syn26607956 | RR_APOE4_metadata_assay_methylationArray.csv | 
+| syn26607954 | RR_APOE4_metadata_biospecimen.csv | 
+| syn73713768 | ROSMAP_clinical_harmonized.csv | 
+
+
+Clinical/Individual data shared with ROSMAP (same Synapse ID as syn3191087); no separate individual metadata file for this cohort 
+
+## Raw Data availability
+```{r ROSMAP-APOE4, echo = FALSE, results = 'hide'}
+apoe4_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP_APOE4'
+apoe4_out_dir <- '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/'
+dir.create(apoe4_out_dir, recursive = T)
+apoe4_meth_df <- read.table(file.path(apoe4_dir, 'RR_APOE4_metadata_assay_methylationArray.csv'), sep = ',', header = T)
+apoe4_bio_df <- read.table(file.path(apoe4_dir, 'RR_APOE4_metadata_biospecimen.csv'), sep = ',', header = T)
+# Individual-level clinical data is shared with ROSMAP (same harmonized file)
+apoe4_ind_df <- read.table(file.path(rosmap_dir, 'metadata/ROSMAP_clinical_harmonized.csv'), sep = ',', header = T)
+
+#map the specimenID to individualID and add covariate information
+apoe4_bio_df_subset <- apoe4_bio_df[apoe4_bio_df$specimenID %in% apoe4_meth_df$specimenID,]
+apoe4_meth_df$individualID <- apoe4_bio_df_subset$individualID[match(apoe4_meth_df$specimenID, apoe4_bio_df_subset$specimenID)]
+apoe4_ind_df <- apoe4_ind_df[apoe4_ind_df$individualID %in% apoe4_meth_df$individualID, ]
+
+#Add tissue info to methylation dataset
+apoe4_meth_df$tissue <- apoe4_bio_df_subset$tissue[match(apoe4_meth_df$specimenID, apoe4_bio_df_subset$specimenID)]
+
+#Add tissue info to individual metadata
+apoe4_ind_df$tissue <- apoe4_bio_df_subset$tissue[match(apoe4_ind_df$individualID, apoe4_bio_df_subset$individualID)]
+
+# Validate harmonization
+validate_harmonized(apoe4_ind_df, "ROSMAP APOE4")
+
+# Check if green and red .idat files present for all samples
+apoe4_grn_file_names <- list.files(file.path(apoe4_dir, 'raw_data'), pattern = '_Grn\\.idat$', recursive = TRUE)
+apoe4_red_file_names <- list.files(file.path(apoe4_dir, 'raw_data'), pattern = '_Red\\.idat$', recursive = TRUE)
+
+apoe4_grn_sample_names <- sub('_Grn\\.idat$', '', basename(apoe4_grn_file_names))
+apoe4_red_sample_names <- sub('_Red\\.idat$', '', basename(apoe4_red_file_names))
+
+apoe4_sample_names <- paste0(apoe4_meth_df$SentrixID, '_', apoe4_meth_df$SentrixRowColumn)
+
+length(intersect(apoe4_sample_names, apoe4_grn_sample_names))
+length(intersect(apoe4_sample_names, apoe4_red_sample_names))
+
+length(unique(apoe4_ind_df$individualID))
+
+# Samples with metadata but missing a Grn and/or Red IDAT file
+apoe4_missing_idat <- union(
+  setdiff(apoe4_sample_names, apoe4_grn_sample_names),
+  setdiff(apoe4_sample_names, apoe4_red_sample_names)
+)
+
+# IDAT files present on disk with no matching metadata row
+apoe4_missing_metadata <- union(
+  setdiff(apoe4_grn_sample_names, apoe4_sample_names),
+  setdiff(apoe4_red_sample_names, apoe4_sample_names)
+)
+
+cat(length(apoe4_missing_idat), "sample(s) in metadata with no matching IDAT file(s):\n")
+print(apoe4_missing_idat)
+
+cat(length(apoe4_missing_metadata), "IDAT sample(s) on disk with no matching metadata row:\n")
+print(apoe4_missing_metadata)
+
+apoe4_idat_sample_names <- union(apoe4_grn_sample_names, apoe4_red_sample_names)
+plot_overlap_venn(apoe4_sample_names, apoe4_idat_sample_names, "ROSMAP APOE4")
+
+# Remove samples missing IDAT files before writing out and summarizing
+apoe4_meth_df <- apoe4_meth_df[!apoe4_sample_names %in% apoe4_missing_idat, ]
+apoe4_ind_df <- apoe4_ind_df[apoe4_ind_df$individualID %in% apoe4_meth_df$individualID, ]
+
+write.table(apoe4_ind_df, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+write.table(apoe4_meth_df, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+```
+`r length(intersect(apoe4_sample_names, apoe4_grn_sample_names))` of `r length(apoe4_sample_names)` Green IDAT files and `r length(intersect(apoe4_sample_names, apoe4_red_sample_names))` of `r length(apoe4_sample_names)` Red IDAT files present for ROSMAP APOE4 cohort.
+
+`r length(apoe4_missing_idat)` sample(s) in the metadata have no matching IDAT file`r if (length(apoe4_missing_idat)) paste0(": ", paste(apoe4_missing_idat, collapse = ", ")) else ""`.
+
+`r length(apoe4_missing_metadata)` IDAT sample(s) on disk have no matching metadata row`r if (length(apoe4_missing_metadata)) paste0(": ", paste(apoe4_missing_metadata, collapse = ", ")) else ""`.
+
+## Demographics
+
+```{r ROSMAP-APOE4-demographics, echo = FALSE, results = "asis"}
+summarize_demographics(apoe4_ind_df, "ROSMAP APOE4")
+```
+
+# MOA-PAD
+| Synapse ID | File name |
+|---|---|
+| syn34166276 | DNA methylation Array raw data |
+| syn50087901 | MOA-PAD_assay_methylationArray_metadata.csv |
+| syn50087874 | MOA-PAD_biospecimen_metadata.csv |
+| syn50087850 | MOA-PAD_individual_metadata.csv |
+
+## Data availability
+
+```{r MOA-PAD, echo = FALSE, results = 'hide'}
+moa_pad_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/MOA-PAD'
+moa_pad_out_dir <- '/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/'
+dir.create(moa_pad_out_dir, recursive = T)
+moa_pad_meth_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_assay_methylationArray_metadata.csv'), sep = ',', header = T)
+moa_pad_bio_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_biospecimen_metadata.csv'), sep = ',', header = T)
+length(intersect(moa_pad_meth_df$specimenID, moa_pad_bio_df$specimenID)) #All 748 samples accounted for 
+moa_pad_ind_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_individual_metadata.csv'), sep = ',', header = T)
+moa_pad_bio_df[moa_pad_bio_df$specimenID %in% moa_pad_meth_df$specimenID & moa_pad_bio_df$exclude == TRUE,] #All samples have NA as exlude 
+#map the specimenID to individualID and add covariate information 
+moa_pad_bio_df_subset <- moa_pad_bio_df[moa_pad_bio_df$specimenID %in% moa_pad_meth_df$specimenID,]
+moa_pad_meth_df$individualID <- moa_pad_bio_df_subset$individualID[match(moa_pad_meth_df$specimenID, moa_pad_bio_df_subset$specimenID)]
+
+#Add tissue info to methylation dataset
+moa_pad_meth_df$tissue <- moa_pad_bio_df_subset$tissue[match(moa_pad_meth_df$specimenID, moa_pad_bio_df_subset$specimenID)]
+
+#Add tissue info to individual metadata
+moa_pad_ind_df$tissue <- moa_pad_bio_df_subset$tissue[match(moa_pad_ind_df$individualID, moa_pad_bio_df_subset$individualID)]
+
+# Harmonize MOA-PAD individual metadata to the ADKP harmonized data dictionary
+# In this individual file only ID/sex/race/ageDeath/diagnosis carry data;
+# APOE/PMI/education/ethnicity/neuropath are NA (study reports they were assessed,
+# so a fuller phenotype file likely exists on Synapse). Rows for those columns are
+# kept so they populate automatically once real values are supplied.
+mapping_moa_pad <- tribble(
+  ~target,                 ~source,          ~type,     ~map,        ~const,       ~fn,      ~default,
+  "individualID",          "individualID",   "id",      NA,          NA,           NA,       NA,
+  "dataContributionGroup", NA,               "const",   NA,          "PITT-ADRC",  NA,       NA,
+  "cohort",                NA,               "const",   NA,          "PITT-ADRC",  NA,       NA,
+  "species",               "species",        "string",  NA,          NA,           NA,       "Human",
+  "sex",                   "sex",            "map",     "sex",       NA,           NA,       NA,
+  "race",                  "race",           "map",     "race",      NA,           NA,       NA,
+  "isHispanic",            "ethnicity",      "map",     "hispanic",  NA,           NA,       NA,
+  "ageDeath",              "ageDeath",       "age",     NA,          NA,           NA,       NA,
+  "PMI",                   "pmi",            "numeric", NA,          NA,           NA,       NA,
+  "apoeGenotype",          "apoeGenotype",   "apoe",    NA,          NA,           NA,       NA,
+  "apoe4Status",           "apoeGenotype",   "derive",  NA,          NA,           "apoe4",  NA,
+  "amyCerad",              "CERAD",          "map",     "cerad",     NA,           NA,       NA,
+  "amyAny",                "amyCerad",       "derive",  NA,          NA,           "amyAny", NA,
+  "amyThal",               "amyThal",        "map",     "thal",      NA,           NA,       NA,
+  "amyA",                  "amyThal",        "derive",  NA,          NA,           "amyA",   NA,
+  "Braak",                 "Braak",          "map",     "braak",     NA,           NA,       NA,
+  "bScore",                "Braak",          "derive",  NA,          NA,           "bScore", NA
+)
+keep_moa_pad <- c("yearsEducation","causeDeath","mannerDeath","pH","brainWeight",
+                  "diagnosis","diagnosisCriteria","tissue")
+
+moa_pad_h <- harmonize_adkp(moa_pad_ind_df, mapping_moa_pad, keep_extra = keep_moa_pad)
+
+#subset to individualIDs with methyltion data
+moa_pad_h <- moa_pad_h[moa_pad_h$individualID %in% moa_pad_meth_df$individualID, ]
+
+# Check if green and red .idat files present for all samples
+moa_pad_grn_file_names <- list.files(file.path(moa_pad_dir, 'raw_data'), pattern = '_Grn\\.idat$', recursive = TRUE)
+moa_pad_red_file_names <- list.files(file.path(moa_pad_dir, 'raw_data'), pattern = '_Red\\.idat$', recursive = TRUE)
+
+moa_pad_grn_sample_names <- sub('_Grn\\.idat$', '', basename(moa_pad_grn_file_names))
+moa_pad_red_sample_names <- sub('_Red\\.idat$', '', basename(moa_pad_red_file_names))
+
+moa_pad_sample_names <- paste0(moa_pad_meth_df$SentrixID, '_', moa_pad_meth_df$SentrixRowColumn)
+
+length(intersect(moa_pad_sample_names, moa_pad_grn_sample_names))
+length(intersect(moa_pad_sample_names, moa_pad_red_sample_names))
+
+length(unique(moa_pad_meth_df$individualID))
+
+# Samples with metadata but missing a Grn and/or Red IDAT file
+moa_pad_missing_idat <- union(
+  setdiff(moa_pad_sample_names, moa_pad_grn_sample_names),
+  setdiff(moa_pad_sample_names, moa_pad_red_sample_names)
+)
+
+# IDAT files present on disk with no matching metadata row
+moa_pad_missing_metadata <- union(
+  setdiff(moa_pad_grn_sample_names, moa_pad_sample_names),
+  setdiff(moa_pad_red_sample_names, moa_pad_sample_names)
+)
+
+cat(length(moa_pad_missing_idat), "sample(s) in metadata with no matching IDAT file(s):\n")
+print(moa_pad_missing_idat)
+
+cat(length(moa_pad_missing_metadata), "IDAT sample(s) on disk with no matching metadata row:\n")
+print(moa_pad_missing_metadata)
+
+moa_pad_idat_sample_names <- union(moa_pad_grn_sample_names, moa_pad_red_sample_names)
+plot_overlap_venn(moa_pad_sample_names, moa_pad_idat_sample_names, "MOA-PAD")
+
+# Remove samples missing IDAT files before writing out and summarizing
+moa_pad_meth_df <- moa_pad_meth_df[!moa_pad_sample_names %in% moa_pad_missing_idat, ]
+moa_pad_h <- moa_pad_h[moa_pad_h$individualID %in% moa_pad_meth_df$individualID, ]
+
+write.table(moa_pad_h, file = file.path(moa_pad_out_dir, 'MOA-PAD_individual_metadata_processed.csv'), sep = ',', row.names = F, col.names = T)
+write.table(moa_pad_meth_df, file = file.path(moa_pad_out_dir, 'MOA-PAD_assay_methylationArray_metadata_processed.csv'), sep = ',', row.names = F, col.names = T)
+```
+`r length(intersect(moa_pad_sample_names, moa_pad_grn_sample_names))` of `r length(moa_pad_sample_names)` Grn IDAT files and `r length(intersect(moa_pad_sample_names, moa_pad_red_sample_names))` of `r length(moa_pad_sample_names)` Red IDAT files present for MOA-PAD cohort.
+
+`r length(moa_pad_missing_idat)` sample(s) in the metadata have no matching IDAT file`r if (length(moa_pad_missing_idat)) paste0( ": ", paste(moa_pad_missing_idat, collapse = ", ")) else ""`.
+
+`r length(moa_pad_missing_metadata)` IDAT sample(s) on disk have no matching metadata row: `r if (length(moa_pad_missing_metadata)) paste0(": ", paste(moa_pad_missing_metadata, collapse = ", ")) else ""`.
+
+## Demographics
+
+```{r MOA-PAD-demographics, echo = FALSE, results = "asis"}
+summarize_demographics(moa_pad_h, "MOA-PAD")
+
+# ---- example: harmonize and combine ----------------------------------------
+# moa_pad_h <- harmonize_moa_pad(moa_pad_ind_df)   # dataContributionGroup & cohort = "Pitt"
+# validate_harmonized(moa_pad_h)
+#
+# # union columns, then stack all three studies:
+# all_cols <- union(union(names(rosmap_ind_df), names(msbb_ind_df)), names(moa_pad_h))
+# fill_cols <- function(d) { for (c in setdiff(all_cols, names(d))) d[[c]] <- NA; d[all_cols] }
+# combined <- dplyr::bind_rows(fill_cols(rosmap_ind_df),
+#                              fill_cols(msbb_ind_df),
+#                              fill_cols(moa_pad_h))
+```
+
