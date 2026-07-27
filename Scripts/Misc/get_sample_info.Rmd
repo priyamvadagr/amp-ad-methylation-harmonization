@@ -37,26 +37,37 @@ library(dplyr)
 library(ggplot2)
 library(knitr)
 library(ggVennDiagram)
-source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/Misc/harmonize_metadata.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/R/harmonize_metadata.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/R/build_idat_manifest.R")
 ```
 ```{r demographics-helper, include=FALSE}
 # Summarize the core harmonized demographic columns for one cohort.
+# `df` is expected to be a per-specimen (methylation) data frame. Demographic
+# columns are collapsed to one row per individualID before tabulating so
+# individuals with multiple specimens aren't counted multiple times; tissue
+# is left at the specimen level so it reflects the real sample count.
 summarize_demographics <- function(df, cohort_name,
                                     vars = c("sex","race","isHispanic","apoe4Status","Braak", "tissue"),
-                                    var_labels = c("Sex","Race","Hispanic Ethnicity","apoe4 Status","Braak Stage", "Specimen Tissue")) {
-  vars <- vars[vars %in% names(df)]
+                                    var_labels = c("Sex","Race","Hispanic Ethnicity","apoe4 Status","Braak Stage", "Specimen Tissue"),
+                                    id_col = "individualID") {
+  keep <- vars %in% names(df)
+  vars <- vars[keep]
+  var_labels <- var_labels[keep]
+
+  df_by_individual <- df[!duplicated(df[[id_col]]), ]
 
   for (v in seq_along(vars)) {
     v_name <- var_labels[v]
     cat("\n", v_name, "\n\n")
-    tbl <- as.data.frame(table(df[[vars[v]]], useNA = "ifany"))
+    tbl_df <- if (vars[v] == "tissue") df else df_by_individual
+    tbl <- as.data.frame(table(tbl_df[[vars[v]]], useNA = "ifany"))
     names(tbl) <- c(v_name, "Count")
     print(kable(tbl))
     cat("\n")
   }
 
   if ("ageDeath" %in% names(df)) {
-    age_numeric <- suppressWarnings(as.numeric(ifelse(df$ageDeath == "90+", "90", df$ageDeath)))
+    age_numeric <- suppressWarnings(as.numeric(ifelse(df_by_individual$ageDeath == "90+", "90", df_by_individual$ageDeath)))
     cat("\n Age at Death (numeric summary; '90+' top-coded to 90)\n\n")
     age_summary <- summary(age_numeric)
     age_tbl <- data.frame(Statistic = names(age_summary), Value = as.numeric(age_summary))
@@ -93,10 +104,10 @@ plot_overlap_venn <- function(metadata_samples, idat_samples, cohort_name) {
 msbb_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/MSBB'
 msbb_out_dir <- '/home/ec2-user/data/methyl_harmonization/MSBB/metadata/'
 dir.create(msbb_out_dir, recursive = T)
-msbb_meth_df <- read.table(file.path(msbb_dir,'metadata/MSBB_assay_MethylationArray_metadata.csv'), sep = ',', header = T)
-msbb_bio_df <- read.table(file.path(msbb_dir,'metadata/MSBB_biospecimen_metadata.csv'), sep = ',', header = T)
-#length(intersect(msbb_meth_df$specimenID, msbb_bio_df$specimenID)) #All 201 samples accounted for 
-msbb_ind_df <- read.table(file.path(msbb_dir,'metadata/MSBB_individual_metadata_harmonized.csv'), sep = ',', header = T)
+msbb_meth_df <- read.csv(file.path(msbb_dir,'metadata/MSBB_assay_MethylationArray_metadata.csv'))
+msbb_bio_df <- read.csv(file.path(msbb_dir,'metadata/MSBB_biospecimen_metadata.csv'))
+#length(intersect(msbb_meth_df$specimenID, msbb_bio_df$specimenID)) #All 201 samples accounted for
+msbb_ind_df <- read.csv(file.path(msbb_dir,'metadata/MSBB_individual_metadata_harmonized.csv'))
 z <- msbb_bio_df[msbb_bio_df$specimenID %in% msbb_meth_df$specimenID & msbb_bio_df$exclude != TRUE,] #No samples flagged to be excluded 
 
 
@@ -157,6 +168,11 @@ msbb_ind_df <- msbb_ind_df[msbb_ind_df$individualID %in% msbb_meth_df$individual
 # Write out processed data
 write.table(msbb_ind_df, file = file.path(msbb_out_dir, 'MSBB_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
 write.table(msbb_meth_df, file = file.path(msbb_out_dir, 'MSBB_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+
+# Manifest: specimenID/individualID <-> green/red IDAT file names
+msbb_manifest <- build_idat_manifest(msbb_meth_df, "Sentrix_ID", "Sentrix_Row_Column",
+                                      msbb_grn_file_names, msbb_red_file_names)
+write.table(msbb_manifest, file = file.path(msbb_out_dir, 'MSBB_idat_manifest.csv'), sep = ',', col.names = T, row.names = F)
 ```
 `r length(intersect(msbb_sample_names, msbb_grn_sample_names))` of `r length(msbb_sample_names)` Green IDAT files and `r length(intersect(msbb_sample_names, msbb_red_sample_names))` of `r length(msbb_sample_names)` Red IDAT files present for MSBB cohort.
 
@@ -167,7 +183,11 @@ write.table(msbb_meth_df, file = file.path(msbb_out_dir, 'MSBB_assay_methylation
 ## Demographics
 
 ```{r MSBB-demographics, echo = FALSE, results = "asis"}
-summarize_demographics(msbb_ind_df, "MSBB")
+demo_vars <- c("sex","race","isHispanic","apoe4Status","Braak","ageDeath")
+demo_vars <- demo_vars[demo_vars %in% names(msbb_ind_df)]
+msbb_meth_df[demo_vars] <- msbb_ind_df[match(msbb_meth_df$individualID, msbb_ind_df$individualID), demo_vars]
+
+summarize_demographics(msbb_meth_df, "MSBB")
 ```
 
 # ROSMAP
@@ -185,10 +205,10 @@ summarize_demographics(msbb_ind_df, "MSBB")
 rosmap_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP'
 rosmap_out_dir <- '/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/'
 dir.create(rosmap_out_dir, recursive = T)
-rosmap_meth_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_assay_methylationArray_metadata.csv'), sep = ',', header = T)
-rosmap_bio_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_biospecimen_metadata.csv'), sep = ',', header = T)
-#length(intersect(rosmap_meth_df$specimenID, rosmap_bio_df$specimenID)) #All 748 samples accounted for 
-rosmap_ind_df <- read.table(file.path(rosmap_dir,'metadata/ROSMAP_clinical_harmonized.csv'), sep = ',', header = T)
+rosmap_meth_df <- read.csv(file.path(rosmap_dir,'metadata/ROSMAP_assay_methylationArray_metadata.csv'))
+rosmap_bio_df <- read.csv(file.path(rosmap_dir,'metadata/ROSMAP_biospecimen_metadata.csv'))
+#length(intersect(rosmap_meth_df$specimenID, rosmap_bio_df$specimenID)) #All 748 samples accounted for
+rosmap_ind_df <- read.csv(file.path(rosmap_dir,'metadata/ROSMAP_clinical_harmonized.csv'))
 x <- rosmap_bio_df[rosmap_bio_df$specimenID %in% rosmap_meth_df$specimenID & is.na(rosmap_bio_df$exclude),] #All samples have NA as exlude 
 
 #map the specimenID to individualID and add covariate information 
@@ -244,6 +264,11 @@ rosmap_ind_df <- rosmap_ind_df[rosmap_ind_df$individualID %in% rosmap_meth_df$in
 
 write.table(rosmap_ind_df, file = file.path(rosmap_out_dir, 'ROSMAP_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
 write.table(rosmap_meth_df, file = file.path(rosmap_out_dir, 'ROSMAP_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+
+# Manifest: specimenID/individualID <-> green/red IDAT file names
+rosmap_manifest <- build_idat_manifest(rosmap_meth_df, "Sentrix_ID", "Sentrix_Row_Column",
+                                        rosmap_grn_file_names, rosmap_red_file_names)
+write.table(rosmap_manifest, file = file.path(rosmap_out_dir, 'ROSMAP_idat_manifest.csv'), sep = ',', col.names = T, row.names = F)
 ```
 `r length(intersect(rosmap_sample_names, rosmap_grn_sample_names))` of `r length(rosmap_sample_names)` Greenn IDAT files and `r length(intersect(rosmap_sample_names, rosmap_red_sample_names))` of `r length(rosmap_sample_names)` Red IDAT files present for ROSMAP cohort.
 
@@ -251,10 +276,17 @@ write.table(rosmap_meth_df, file = file.path(rosmap_out_dir, 'ROSMAP_assay_methy
 
 `r length(rosmap_missing_metadata)` IDAT sample(s) on disk have no matching metadata row`r if (length(rosmap_missing_metadata)) paste0(": ", paste(rosmap_missing_metadata, collapse = ", ")) else ""`.
 
+7 specimen IDs do not have associated individualIDs: PT-M5QO, TBI-AUTO73128-PT-2ZXU, PT-M5QS, TBI-AUTO73300-PT-317T, and TBI-AUTO72965-PT-318P, PT-BZBS, PT-BZRQ, PT-BZBH
+
+
 ## Demographics
 
 ```{r ROSMAP-demographics, echo = FALSE, results = "asis"}
-summarize_demographics(rosmap_ind_df, "ROSMAP")
+demo_vars <- c("sex","race","isHispanic","apoe4Status","Braak","ageDeath")
+demo_vars <- demo_vars[demo_vars %in% names(rosmap_ind_df)]
+rosmap_meth_df[demo_vars] <- rosmap_ind_df[match(rosmap_meth_df$individualID, rosmap_ind_df$individualID), demo_vars]
+
+summarize_demographics(rosmap_meth_df, "ROSMAP")
 ```
 
 # ROSMAP APOE4
@@ -274,10 +306,10 @@ Clinical/Individual data shared with ROSMAP (same Synapse ID as syn3191087); no 
 apoe4_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP_APOE4'
 apoe4_out_dir <- '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/'
 dir.create(apoe4_out_dir, recursive = T)
-apoe4_meth_df <- read.table(file.path(apoe4_dir, 'RR_APOE4_metadata_assay_methylationArray.csv'), sep = ',', header = T)
-apoe4_bio_df <- read.table(file.path(apoe4_dir, 'RR_APOE4_metadata_biospecimen.csv'), sep = ',', header = T)
+apoe4_meth_df <- read.csv(file.path(apoe4_dir, 'RR_APOE4_metadata_assay_methylationArray.csv'))
+apoe4_bio_df <- read.csv(file.path(apoe4_dir, 'RR_APOE4_metadata_biospecimen.csv'))
 # Individual-level clinical data is shared with ROSMAP (same harmonized file)
-apoe4_ind_df <- read.table(file.path(rosmap_dir, 'metadata/ROSMAP_clinical_harmonized.csv'), sep = ',', header = T)
+apoe4_ind_df <- read.csv(file.path(rosmap_dir, 'metadata/ROSMAP_clinical_harmonized.csv'))
 
 #map the specimenID to individualID and add covariate information
 apoe4_bio_df_subset <- apoe4_bio_df[apoe4_bio_df$specimenID %in% apoe4_meth_df$specimenID,]
@@ -334,6 +366,11 @@ apoe4_ind_df <- apoe4_ind_df[apoe4_ind_df$individualID %in% apoe4_meth_df$indivi
 
 write.table(apoe4_ind_df, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_individual_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
 write.table(apoe4_meth_df, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_assay_methylationArray_metadata_processed.csv'), sep = ',', col.names = T, row.names = F)
+
+# Manifest: specimenID/individualID <-> green/red IDAT file names
+apoe4_manifest <- build_idat_manifest(apoe4_meth_df, "SentrixID", "SentrixRowColumn",
+                                       apoe4_grn_file_names, apoe4_red_file_names)
+write.table(apoe4_manifest, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_idat_manifest.csv'), sep = ',', col.names = T, row.names = F)
 ```
 `r length(intersect(apoe4_sample_names, apoe4_grn_sample_names))` of `r length(apoe4_sample_names)` Green IDAT files and `r length(intersect(apoe4_sample_names, apoe4_red_sample_names))` of `r length(apoe4_sample_names)` Red IDAT files present for ROSMAP APOE4 cohort.
 
@@ -344,7 +381,11 @@ write.table(apoe4_meth_df, file = file.path(apoe4_out_dir, 'ROSMAP_APOE4_assay_m
 ## Demographics
 
 ```{r ROSMAP-APOE4-demographics, echo = FALSE, results = "asis"}
-summarize_demographics(apoe4_ind_df, "ROSMAP APOE4")
+demo_vars <- c("sex","race","isHispanic","apoe4Status","Braak","ageDeath")
+demo_vars <- demo_vars[demo_vars %in% names(apoe4_ind_df)]
+apoe4_meth_df[demo_vars] <- apoe4_ind_df[match(apoe4_meth_df$individualID, apoe4_ind_df$individualID), demo_vars]
+
+summarize_demographics(apoe4_meth_df, "ROSMAP APOE4")
 ```
 
 # MOA-PAD
@@ -361,10 +402,10 @@ summarize_demographics(apoe4_ind_df, "ROSMAP APOE4")
 moa_pad_dir <- '/home/ec2-user/data/methyl_harmonization/methyl_data/MOA-PAD'
 moa_pad_out_dir <- '/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/'
 dir.create(moa_pad_out_dir, recursive = T)
-moa_pad_meth_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_assay_methylationArray_metadata.csv'), sep = ',', header = T)
-moa_pad_bio_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_biospecimen_metadata.csv'), sep = ',', header = T)
-length(intersect(moa_pad_meth_df$specimenID, moa_pad_bio_df$specimenID)) #All 748 samples accounted for 
-moa_pad_ind_df <- read.table(file.path(moa_pad_dir,'metadata/MOA-PAD_individual_metadata.csv'), sep = ',', header = T)
+moa_pad_meth_df <- read.csv(file.path(moa_pad_dir,'metadata/MOA-PAD_assay_methylationArray_metadata.csv'))
+moa_pad_bio_df <- read.csv(file.path(moa_pad_dir,'metadata/MOA-PAD_biospecimen_metadata.csv'))
+length(intersect(moa_pad_meth_df$specimenID, moa_pad_bio_df$specimenID)) #All 748 samples accounted for
+moa_pad_ind_df <- read.csv(file.path(moa_pad_dir,'metadata/MOA-PAD_individual_metadata.csv'))
 moa_pad_bio_df[moa_pad_bio_df$specimenID %in% moa_pad_meth_df$specimenID & moa_pad_bio_df$exclude == TRUE,] #All samples have NA as exlude 
 #map the specimenID to individualID and add covariate information 
 moa_pad_bio_df_subset <- moa_pad_bio_df[moa_pad_bio_df$specimenID %in% moa_pad_meth_df$specimenID,]
@@ -450,6 +491,11 @@ moa_pad_h <- moa_pad_h[moa_pad_h$individualID %in% moa_pad_meth_df$individualID,
 
 write.table(moa_pad_h, file = file.path(moa_pad_out_dir, 'MOA-PAD_individual_metadata_processed.csv'), sep = ',', row.names = F, col.names = T)
 write.table(moa_pad_meth_df, file = file.path(moa_pad_out_dir, 'MOA-PAD_assay_methylationArray_metadata_processed.csv'), sep = ',', row.names = F, col.names = T)
+
+# Manifest: specimenID/individualID <-> green/red IDAT file names
+moa_pad_manifest <- build_idat_manifest(moa_pad_meth_df, "SentrixID", "SentrixRowColumn",
+                                         moa_pad_grn_file_names, moa_pad_red_file_names)
+write.table(moa_pad_manifest, file = file.path(moa_pad_out_dir, 'MOA-PAD_idat_manifest.csv'), sep = ',', row.names = F, col.names = T)
 ```
 `r length(intersect(moa_pad_sample_names, moa_pad_grn_sample_names))` of `r length(moa_pad_sample_names)` Grn IDAT files and `r length(intersect(moa_pad_sample_names, moa_pad_red_sample_names))` of `r length(moa_pad_sample_names)` Red IDAT files present for MOA-PAD cohort.
 
@@ -460,7 +506,11 @@ write.table(moa_pad_meth_df, file = file.path(moa_pad_out_dir, 'MOA-PAD_assay_me
 ## Demographics
 
 ```{r MOA-PAD-demographics, echo = FALSE, results = "asis"}
-summarize_demographics(moa_pad_h, "MOA-PAD")
+demo_vars <- c("sex","race","isHispanic","apoe4Status","Braak","ageDeath")
+demo_vars <- demo_vars[demo_vars %in% names(moa_pad_h)]
+moa_pad_meth_df[demo_vars] <- moa_pad_h[match(moa_pad_meth_df$individualID, moa_pad_h$individualID), demo_vars]
+
+summarize_demographics(moa_pad_meth_df, "MOA-PAD")
 
 # ---- example: harmonize and combine ----------------------------------------
 # moa_pad_h <- harmonize_moa_pad(moa_pad_ind_df)   # dataContributionGroup & cohort = "Pitt"
