@@ -1,0 +1,137 @@
+---
+title: "Sample-Level Methylation QC"
+subtitle: "Detection p-values, intensity, predicted sex, control probes"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+mainfont: "DejaVu Sans"
+fontsize: 10pt
+header-includes:
+  - \usepackage{titlesec}
+  - \usepackage{xcolor}
+  - \definecolor{darkblue}{HTML}{00008B}
+  - \titleformat{\section}{\color{darkblue}\Large\bfseries}{\thesection}{1em}{}
+  - \titleformat{\subsection}{\color{darkblue}\large\bfseries}{\thesubsection}{1em}{}
+  - \titleformat{\subsubsection}{\color{darkblue}\normalsize\bfseries}{\thesubsubsection}{1em}{}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 12,
+  fig.height = 4,
+  fig.align  = "center"
+)
+```
+```{r libraries, include=FALSE}
+library(minfi)
+library(knitr)
+source("/home/ec2-user/AMP-AD_methylation_harmonization/R/sample_qc.R")
+
+# Attach reported sex onto pData(rg) from the cohort's processed individual
+# metadata (not carried by the idat manifest used to compile the
+# RGChannelSet), matched on individualID.
+attach_sex <- function(rg, individual_csv) {
+  ind <- read.csv(individual_csv, stringsAsFactors = FALSE)
+  pData(rg)$sex <- ind$sex[match(pData(rg)$individualID, ind$individualID)]
+  rg
+}
+```
+
+Each cohort's RGChannelSet was compiled by `compile_idat_files.R`
+(`<cohort>/combined_idat/<cohort>.rds`). Reported sex is merged in from
+`<cohort>/metadata/<cohort>_individual_metadata_processed.csv` before QC.
+`sample_qc()` flags samples on detection p-value, overall intensity, and
+predicted-vs-reported sex; writes the control-probe QC report and diagnostic
+plots to `<cohort>/qc/`; and returns the RGChannelSet with failing samples
+removed.
+
+# MSBB
+
+```{r MSBB, results = 'hide'}
+rg_msbb <- readRDS("/home/ec2-user/data/methyl_harmonization/MSBB/combined_idat/MSBB.rds")
+rg_msbb <- attach_sex(rg_msbb,
+             "/home/ec2-user/data/methyl_harmonization/MSBB/metadata/MSBB_individual_metadata_processed.csv")
+
+dir.create("/home/ec2-user/data/methyl_harmonization/MSBB/qc",
+           recursive = TRUE, showWarnings = FALSE)
+
+res_msbb <- sample_qc(rg_msbb, sex_col = "sex",
+                      out_prefix = "/home/ec2-user/data/methyl_harmonization/MSBB/qc/MSBB")
+
+saveRDS(res_msbb$rg_clean,
+        "/home/ec2-user/data/methyl_harmonization/MSBB/qc/MSBB_qc.rds")
+```
+```{r MSBB-summary, echo = FALSE}
+kable(subset(res_msbb$qc, drop), row.names = FALSE,
+      caption = "MSBB samples flagged to drop")
+```
+
+# ROSMAP
+
+```{r ROSMAP, results = 'hide'}
+rg_rosmap <- readRDS("/home/ec2-user/data/methyl_harmonization/ROSMAP/combined_idat/ROSMAP.rds")
+rg_rosmap <- attach_sex(rg_rosmap,
+               "/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/ROSMAP_individual_metadata_processed.csv")
+
+dir.create("/home/ec2-user/data/methyl_harmonization/ROSMAP/qc",
+           recursive = TRUE, showWarnings = FALSE)
+
+res_rosmap <- sample_qc(rg_rosmap, sex_col = "sex",
+                        out_prefix = "/home/ec2-user/data/methyl_harmonization/ROSMAP/qc/ROSMAP")
+
+saveRDS(res_rosmap$rg_clean,
+        "/home/ec2-user/data/methyl_harmonization/ROSMAP/qc/ROSMAP_qc.rds")
+```
+```{r ROSMAP-summary, echo = FALSE}
+kable(subset(res_rosmap$qc, drop), row.names = FALSE,
+      caption = "ROSMAP samples flagged to drop")
+```
+
+# ROSMAP APOE4
+
+```{r ROSMAP-APOE4, results = 'hide'}
+rg_rosmap_apoe4 <- readRDS("/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/combined_idat/ROSMAP_APOE4.rds")
+rg_rosmap_apoe4 <- attach_sex(rg_rosmap_apoe4,
+                     "/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/ROSMAP_APOE4_individual_metadata_processed.csv")
+
+dir.create("/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/qc",
+           recursive = TRUE, showWarnings = FALSE)
+
+res_rosmap_apoe4 <- sample_qc(rg_rosmap_apoe4, sex_col = "sex",
+                              out_prefix = "/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/qc/ROSMAP_APOE4")
+
+saveRDS(res_rosmap_apoe4$rg_clean,
+        "/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/qc/ROSMAP_APOE4_qc.rds")
+```
+```{r ROSMAP-APOE4-summary, echo = FALSE}
+kable(subset(res_rosmap_apoe4$qc, drop), row.names = FALSE,
+      caption = "ROSMAP APOE4 samples flagged to drop")
+```
+
+# MOA-PAD
+
+```{r MOA-PAD, results = 'hide'}
+rg_moa_pad <- readRDS("/home/ec2-user/data/methyl_harmonization/MOA-PAD/combined_idat/MOA-PAD.rds")
+rg_moa_pad <- attach_sex(rg_moa_pad,
+                "/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/MOA-PAD_individual_metadata_processed.csv")
+
+dir.create("/home/ec2-user/data/methyl_harmonization/MOA-PAD/qc",
+           recursive = TRUE, showWarnings = FALSE)
+
+res_moa_pad <- sample_qc(rg_moa_pad, sex_col = "sex",
+                         out_prefix = "/home/ec2-user/data/methyl_harmonization/MOA-PAD/qc/MOA-PAD")
+
+saveRDS(res_moa_pad$rg_clean,
+        "/home/ec2-user/data/methyl_harmonization/MOA-PAD/qc/MOA-PAD_qc.rds")
+```
+```{r MOA-PAD-summary, echo = FALSE}
+kable(subset(res_moa_pad$qc, drop), row.names = FALSE,
+      caption = "MOA-PAD samples flagged to drop")
+```
