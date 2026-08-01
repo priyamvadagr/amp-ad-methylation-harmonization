@@ -1,33 +1,52 @@
 # ============================================================================
-# Run sample-level QC (detection p-values, intensity, predicted-vs-reported
-# sex, bisulfite conversion, control probes) on each cohort's compiled
-# RGChannelSet, as written by compile_idat_files.R to
-# <cohort>/combined_idat/<cohort>.rds. Reported sex is merged in from
-# <cohort>/metadata/<cohort>_individual_metadata_processed.csv (not carried by
-# the idat manifest used to compile the RGChannelSet), matched on
-# individualID.
+# Run sample-level QC on each cohort's compiled RGChannelSet, in two phases so
+# the raw idats (ewastools) and the RGChannelSet (minfi) are never resident in
+# memory at the same time -- that co-residency is what was getting the job
+# killed on the large cohorts.
 #
-# The bisulfite-conversion and control-probe checks (ewastools) need the raw
-# idat files, not just the compiled RGChannelSet, so each cohort also supplies
-# its idat manifest (<cohort>/metadata/<cohort>_idat_manifest.csv, the same
-# file compile_idat_files.R used) and the raw idat directory
-# (methyl_data/<cohort>/raw_data). Basenames are built from the manifest's
-# grnFile column, same as compile_idat_files.R -- this also covers ROSMAP,
-# whose idats sit in per-Sentrix-barcode subdirectories under raw_data/,
-# because grnFile there already includes that subfolder prefix (e.g.
-# "5815381027/5815381027_R06C01_Grn.idat").
+#   phase=ewastools : read raw idats in memory-bounded chunks and write the
+#                     control-probe QC (bisulfite + sample_failure) to
+#                     <out_prefix>_ewastools.csv. Does NOT load the rds.
+#   phase=minfi     : load the RGChannelSet, run detection-p / intensity / sex
+#                     QC, MERGE the ewastools CSV from the previous phase, write
+#                     <out_prefix>_sample_qc.csv, render figures, save the
+#                     flagged RGChannelSet. Does NOT read raw idats.
+#   phase=all       : run ewastools THEN minfi per cohort in one process
+#                     (default). Safe on smaller cohorts because ewastools_qc()
+#                     frees its idats before the rds is loaded; for the cohorts
+#                     that get killed, run the two phases as SEPARATE Rscript
+#                     calls so each process only holds one of the two.
+#
+# The ewastools checks need the raw idat files, so each cohort supplies its
+# idat manifest and raw idat directory. Basenames are built from the manifest's
+# grnFile column (same as compile_idat_files.R) -- this also covers ROSMAP,
+# whose grnFile already includes the per-Sentrix-barcode subfolder prefix
+# (e.g. "5815381027/5815381027_R06C01_Grn.idat").
+#
+# Reported sex is merged in from <cohort>_individual_metadata_processed.csv
+# (not carried by the idat manifest), matched on individualID.
 #
 # Usage:
-#   Rscript sample_level_QC.R          # process all cohorts
-#   Rscript sample_level_QC.R MSBB ROSMAP
-#                                       # process only the named cohort(s)
+#   Rscript sample_level_QC.R                       # all cohorts, phase=all
+#   Rscript sample_level_QC.R MSBB ROSMAP           # named cohorts, phase=all
+#   Rscript sample_level_QC.R phase=ewastools MSBB  # only the ewastools phase
+#   Rscript sample_level_QC.R phase=minfi     MSBB  # only the minfi phase
+#   Rscript sample_level_QC.R chunk=50 phase=ewastools ROSMAP   # smaller chunks
 #   Rscript sample_level_QC.R \
-#     "NewCohort:/path/to/rg.rds:/path/individual_metadata.csv:/path/idat_manifest.csv:/path/raw_data:/path/out_prefix"
-#                                       # run a cohort not hardcoded below
+#     "NewCohort:/raw/dir:/path/manifest.csv:/path/combined_dir:/path/individual.csv:/path/qc_dir"
+#
+# Recommended for large cohorts (two processes):
+#   Rscript sample_level_QC.R phase=ewastools ROSMAP
+#   Rscript sample_level_QC.R phase=minfi     ROSMAP
+#
+# Cohort paths (raw_dir, manifest, combined_dir, individual_csv, qc_dir) live
+# in R/cohort_config.R, shared with compile_idat_files.R so the two stages
+# can't drift apart.
 # ============================================================================
 
 library(minfi)
 source('/home/ec2-user/AMP-AD_methylation_harmonization/R/sample_qc.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
 
 # Attach reported sex onto pData(rg) from the cohort's processed individual
 # metadata, matched on individualID.
@@ -37,98 +56,77 @@ attach_sex <- function(rg, individual_csv) {
   rg
 }
 
-# Where render_qc_plots() writes its per-cohort figures (in a subfolder named
-# after the cohort).
+# Where render_qc_plots() writes its per-cohort figures (subfolder per cohort).
 plot_root <- '/home/ec2-user/AMP-AD_methylation_harmonization/Results/QC/raw_values'
 
-cohorts_all <- list(
-  MSBB = list(
-    rds_in         = '/home/ec2-user/data/methyl_harmonization/MSBB/combined_idat/MSBB.rds',
-    individual_csv = '/home/ec2-user/data/methyl_harmonization/MSBB/metadata/MSBB_individual_metadata_processed.csv',
-    idat_manifest  = '/home/ec2-user/data/methyl_harmonization/MSBB/metadata/MSBB_idat_manifest.csv',
-    raw_dir        = '/home/ec2-user/data/methyl_harmonization/methyl_data/MSBB/raw_data',
-    out_prefix     = '/home/ec2-user/data/methyl_harmonization/MSBB/qc/MSBB'
-  ),
-  ROSMAP = list(
-    rds_in         = '/home/ec2-user/data/methyl_harmonization/ROSMAP/combined_idat/ROSMAP.rds',
-    individual_csv = '/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/ROSMAP_individual_metadata_processed.csv',
-    idat_manifest  = '/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/ROSMAP_idat_manifest.csv',
-    raw_dir        = '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP/raw_data',
-    out_prefix     = '/home/ec2-user/data/methyl_harmonization/ROSMAP/qc/ROSMAP'
-  ),
-  ROSMAP_APOE4 = list(
-    rds_in         = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/combined_idat/ROSMAP_APOE4.rds',
-    individual_csv = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/ROSMAP_APOE4_individual_metadata_processed.csv',
-    idat_manifest  = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/ROSMAP_APOE4_idat_manifest.csv',
-    raw_dir        = '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP_APOE4/raw_data',
-    out_prefix     = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/qc/ROSMAP_APOE4'
-  ),
-  `MOA-PAD` = list(
-    rds_in         = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/combined_idat/MOA-PAD.rds',
-    individual_csv = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/MOA-PAD_individual_metadata_processed.csv',
-    idat_manifest  = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/MOA-PAD_idat_manifest.csv',
-    raw_dir        = '/home/ec2-user/data/methyl_harmonization/methyl_data/MOA-PAD/raw_data',
-    out_prefix     = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/qc/MOA-PAD'
-  )
-)
+# --- parse args: phase=, chunk=, cohort names, ad-hoc specs -----------------
+args      <- commandArgs(trailingOnly = TRUE)
+phase     <- "all"
+chunk_sz  <- 75
+requested <- character(0)
 
-# Select which cohort(s) to process from the command line; default to all
-# built-in cohorts. Each arg is either:
-#   - a name from cohorts_all (e.g. "MSBB"), or
-#   - an ad-hoc spec "NAME:RDS_IN:INDIVIDUAL_CSV:IDAT_MANIFEST:RAW_DIR:OUT_PREFIX"
-#     for a cohort not (yet) hardcoded above, so new cohorts can be run
-#     without editing this file.
-
-requested <- commandArgs(trailingOnly = TRUE)
-
-if (length(requested) == 0) {
-  cohorts <- cohorts_all
-} else {
-  cohorts <- list()
-  for (arg in requested) {
-    if (grepl(":", arg, fixed = TRUE)) {
-      parts <- strsplit(arg, ":", fixed = TRUE)[[1]]
-      if (length(parts) != 6) {
-        stop("Ad-hoc cohort spec must be ",
-             "'NAME:RDS_IN:INDIVIDUAL_CSV:IDAT_MANIFEST:RAW_DIR:OUT_PREFIX', got: ", arg)
-      }
-      cohorts[[parts[1]]] <- list(rds_in = parts[2], individual_csv = parts[3],
-                                   idat_manifest = parts[4], raw_dir = parts[5],
-                                   out_prefix = parts[6])
-    } else if (arg %in% names(cohorts_all)) {
-      cohorts[[arg]] <- cohorts_all[[arg]]
-    } else {
-      stop("Unknown cohort '", arg, "'. Valid built-in options: ",
-           paste(names(cohorts_all), collapse = ", "),
-           ". To run a cohort not listed above, pass ",
-           "'NAME:RDS_IN:INDIVIDUAL_CSV:IDAT_MANIFEST:RAW_DIR:OUT_PREFIX'.")
-    }
+for (arg in args) {
+  if (grepl("^phase=", arg)) {
+    phase <- sub("^phase=", "", arg)
+  } else if (grepl("^chunk=", arg)) {
+    chunk_sz <- as.integer(sub("^chunk=", "", arg))
+  } else {
+    requested <- c(requested, arg)
   }
 }
+if (!phase %in% c("all", "ewastools", "minfi"))
+  stop("phase must be one of: all, ewastools, minfi (got '", phase, "')")
 
-qc_results <- list()
+# --- select cohorts (shared with compile_idat_files.R; see R/cohort_config.R)
+cohorts <- select_cohorts(requested)
 
-for (cohort_name in names(cohorts)) {
-  cfg <- cohorts[[cohort_name]]
-  cat("\n==== ", cohort_name, " ====\n")
+# --- per-phase workers ------------------------------------------------------
 
-  rg <- readRDS(cfg$rds_in)
+# ewastools phase: read raw idats (chunked) -> <qc_dir>/<cohort>_ewastools.csv.
+run_ewastools_phase <- function(cohort_name, cfg) {
+  cat("\n==== ", cohort_name, " [ewastools] ====\n")
+  manifest <- read.csv(cfg$manifest, stringsAsFactors = FALSE)
+  ewastools_qc(targets   = manifest,
+               raw_dir   = cfg$raw_dir,
+               grn_col   = "grnFile",
+               chunk_size = chunk_sz,
+               out_csv   = file.path(cfg$qc_dir, paste0(cohort_name, "_ewastools.csv")))
+  rm(manifest); gc()
+}
+
+# minfi phase: load rg -> minfi QC + merge ewastools CSV -> figures + save.
+run_minfi_phase <- function(cohort_name, cfg) {
+  cat("\n==== ", cohort_name, " [minfi] ====\n")
+  out_prefix <- file.path(cfg$qc_dir, cohort_name)
+  ew_csv     <- paste0(out_prefix, "_ewastools.csv")
+  if (!file.exists(ew_csv))
+    warning("[", cohort_name, "] no ewastools CSV (", ew_csv,
+            "); bisulfite/control flags will be NA. Run phase=ewastools first.")
+
+  rg <- readRDS(file.path(cfg$combined_dir, paste0(cohort_name, ".rds")))
   rg <- attach_sex(rg, cfg$individual_csv)
 
-  idat_manifest <- read.csv(cfg$idat_manifest, stringsAsFactors = FALSE)
-
-  dir.create(dirname(cfg$out_prefix), recursive = TRUE, showWarnings = FALSE)
-  res <- sample_qc(rg, targets = idat_manifest, raw_dir = cfg$raw_dir, grn_col = "grnFile",
-                   sex_col = "sex", out_prefix = cfg$out_prefix)
+  dir.create(cfg$qc_dir, recursive = TRUE, showWarnings = FALSE)
+  res <- sample_qc(rg,
+                   sex_col       = "sex",
+                   ewastools_csv = ew_csv,      # merged if present, else NA flags
+                   out_prefix    = out_prefix)
 
   cat(cohort_name, "sample QC:", nrow(res$qc_tab), "samples,",
       sum(res$qc_tab$any_flag), "flagged (nothing dropped)\n")
 
   render_qc_plots(res$rg, cohort = cohort_name, out_dir = plot_root, qc_tab = res$qc_tab)
+  saveRDS(res$rg, paste0(out_prefix, "_qc.rds"))
 
-  saveRDS(res$rg, paste0(cfg$out_prefix, "_qc.rds"))
-  qc_results[[cohort_name]] <- res
+  rm(rg, res); gc()
+}
 
-  rm(rg, res, idat_manifest)
-  gc()
+# --- run --------------------------------------------------------------------
+for (cohort_name in names(cohorts)) {
+  cfg <- cohorts[[cohort_name]]
+  dir.create(cfg$qc_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # ewastools first (frees idats) THEN minfi, so the two are never co-resident.
+  if (phase %in% c("all", "ewastools")) run_ewastools_phase(cohort_name, cfg)
+  if (phase %in% c("all", "minfi"))     run_minfi_phase(cohort_name, cfg)
 }

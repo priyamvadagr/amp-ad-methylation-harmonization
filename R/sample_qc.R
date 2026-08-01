@@ -1,30 +1,42 @@
 # ============================================================================
 # Sample-level QC for one cohort's RGChannelSet (minfi + ewastools).
-# Run BEFORE normalization. This file defines two functions, meant to be used
-# together:
+# Run BEFORE normalization. This file defines three functions:
 #
-#   sample_qc()        Computes per-sample QC flags (detection p, intensity,
-#                       sex mismatch, bisulfite conversion, ewastools control
-#                       probes), writes them to a CSV, and copies them into
-#                       pData(rg). FLAGS every problem; drops NOTHING -- you
-#                       decide what to remove downstream using the flags.
+#   ewastools_qc()     Reads raw idats (in memory-bounded chunks) and computes
+#                       the ewastools control-probe QC: bisulfite conversion +
+#                       the 17-metric sample_failure(). Returns / writes a small
+#                       per-sample table. Run this SEPARATELY (ideally in its
+#                       own R process) from sample_qc() so the raw idats and the
+#                       RGChannelSet are never both resident in memory -- this
+#                       is what was getting the job killed on large cohorts.
 #
-#   render_qc_plots()   Renders the diagnostic figures (intensity scatter,
-#                       beta density, failed-probe histogram, sex prediction)
-#                       and, given the qc_tab from sample_qc(), a
+#   sample_qc()        Computes the minfi per-sample QC flags (detection p,
+#                       intensity, sex mismatch) from the RGChannelSet, MERGES
+#                       in the ewastools flags from ewastools_qc() (if given),
+#                       writes them to a CSV, and copies them into pData(rg).
+#                       FLAGS every problem; drops NOTHING.
+#
+#   render_qc_plots()   Renders the diagnostic figures and, given qc_tab, a
 #                       control-probe report restricted to flagged samples.
 #
-# Typical flow: res <- sample_qc(rg, ...); render_qc_plots(res$rg, qc_tab = res$qc_tab, ...)
+# Typical flow (two steps, ideally two Rscript calls):
+#   ew  <- ewastools_qc(targets = manifest, raw_dir = cfg$raw_dir,
+#                       out_csv = paste0(cfg$out_prefix, "_ewastools.csv"))
+#   res <- sample_qc(rg, sex_col = "sex", ewastools_tab = ew,
+#                    out_prefix = cfg$out_prefix)
+#   render_qc_plots(res$rg, cohort = "MSBB", out_dir = "…", qc_tab = res$qc_tab)
 #
 # sample_qc() flags (all flag-only; none force removal):
 #   fail_detp      - too many probes with signal indistinguishable from noise
 #   fail_intensity - overall array signal too low
 #   sex_mismatch   - predicted sex disagrees with recorded sex
-#   fail_bisulfite - bisulfite conversion control below threshold
-#   fail_control   - ewastools sample_failure() over the 17 Illumina controls
+#   fail_bisulfite - bisulfite conversion control below threshold   (ewastools)
+#   fail_control   - ewastools sample_failure() over the 17 controls (ewastools)
+#   fail_beadcount - too many probes measured by < min_beadcount beads
+#                    (requires rg to be an RGChannelSetExtended, i.e. compiled
+#                    with extended = TRUE in read_cohort_idats(); NA otherwise)
 #
 # `flag_reason` records every triggered check per sample ("none" if clean).
-# The flags are also copied into pData(rg) so they travel with the object.
 # ============================================================================
 
 library(minfi)
@@ -35,64 +47,223 @@ library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
 library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
 
 # ---------------------------------------------------------------------------
-# sample_qc(): compute per-sample QC flags for one cohort's RGChannelSet.
+# idat_has_valid_magic(): TRUE if `path` starts with the IDAT binary magic
+# header. Mirrors the helper of the same name in read_cohort_idats.R.
+# ---------------------------------------------------------------------------
+idat_has_valid_magic <- function(path) {
+  con <- file(path, "rb")
+  on.exit(close(con))
+  magic <- tryCatch(readBin(con, "raw", n = 4), error = function(e) raw(0))
+  length(magic) == 4 && rawToChar(magic) == "IDAT"
+}
+
+# ---------------------------------------------------------------------------
+# resolve_basenames(): build idat path prefixes (no _Grn/_Red.idat) from either
+# an explicit `basenames` vector or a manifest `targets` (+ raw_dir/grn_col).
+# ---------------------------------------------------------------------------
+resolve_basenames <- function(basenames = NULL, targets = NULL,
+                              raw_dir = NULL, grn_col = "grnFile") {
+  if (!is.null(basenames)) return(basenames)
+  if (is.null(targets)) return(NULL)
+  tgm <- as.data.frame(targets, stringsAsFactors = FALSE)
+  if ("Basename" %in% names(tgm)) return(tgm$Basename)
+  if (!is.null(raw_dir) && grn_col %in% names(tgm)) {
+    tgm <- tgm[!is.na(tgm[[grn_col]]) & nzchar(tgm[[grn_col]]), ]
+    return(file.path(raw_dir, sub("_Grn\\.idat$", "", tgm[[grn_col]])))
+  }
+  NULL
+}
+
+# ---------------------------------------------------------------------------
+# safe_sample_failure(): wraps ewastools::sample_failure(), which errors on a
+# single-sample chunk -- sapply() over the 17 threshold-metrics collapses to a
+# plain vector instead of a 1-row matrix when each metric evaluates to length
+# 1, so its internal apply(failed, 1, any, na.rm = TRUE) has no dim to iterate
+# over ("dim(X) must have a positive length"). Reimplements the same logic
+# with an explicit reshape so it works regardless of chunk size.
+# ---------------------------------------------------------------------------
+safe_sample_failure <- function(metrics) {
+  failed <- sapply(metrics, function(metric) metric < attr(metric, "threshold"))
+  if (is.null(dim(failed)))
+    failed <- matrix(failed, nrow = length(metrics[[1]]), dimnames = list(NULL, names(metrics)))
+  apply(failed, 1, any, na.rm = TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# ewastools_qc(): control-probe QC (bisulfite conversion + sample_failure)
+# from raw idats, processed in memory-bounded chunks.
 #
-# The RGChannelSet is obtained in this priority order: `rg` if supplied >
-# `rds` if it exists. sample_qc() never builds a RGChannelSet from raw idats
-# itself -- that's compile_idat_files.R's job; pass its output (directly, or
-# via the .rds it wrote) here.
+#   basenames      idat path prefixes (no _Grn/_Red.idat). If NULL, derived
+#                  from `targets` (+ raw_dir/grn_col).
+#   targets        idat manifest data.frame (Basename col, or grn_col+raw_dir)
+#   raw_dir        directory of raw idats (used with grn_col)
+#   grn_col        manifest column with bare "*_Grn.idat" filenames
+#   bisulfite_min  flag sample if any bisulfite-conversion metric < this
+#   chunk_size     number of samples to read_idats() at once (bounds memory);
+#                  NULL / Inf = all at once. control_metrics/sample_failure are
+#                  per-sample, so chunking does not change the result.
+#   check_magic    TRUE = skip idats with a bad magic header (flags -> NA)
+#   out_csv        optional path to write the per-sample table
 #
-#   rg             RGChannelSet (annotation already set); if supplied, `rds`
-#                  is ignored
-#   rds            path to an existing combined-idat RGChannelSet .rds, as
-#                  written by compile_idat_files.R; read if `rg` is not supplied
-#   targets        idat manifest data.frame/list (e.g. the one compile_idat_files.R
-#                  used); needs a Basename column, or `raw_dir` + `grn_col` to
-#                  build one -- used only to derive `basenames` for ewastools
-#   raw_dir        directory of raw idats, used with `grn_col` to build
-#                  Basename paths when `targets` only has bare filenames
-#   grn_col        `targets` column with bare "*_Grn.idat" filenames (paired
-#                  with `raw_dir`) when no Basename column is present
-#   basenames      idat path prefixes (no _Grn/_Red.idat) for ewastools;
-#                  matched to rg by basename(). If NULL (and not derivable
-#                  from `targets`/`raw_dir`), ewastools flags = NA.
+# Returns a data.frame: sample, bisulfite_min, fail_bisulfite, fail_control,
+# corrupt_idat_file (sample = basename() of each idat prefix, matching
+# colnames(rg)). Samples with a corrupt idat (bad magic header) are still
+# included as a row -- corrupt_idat_file = TRUE and all other metrics NA,
+# since they can't be read -- rather than silently dropped from the table.
+# ---------------------------------------------------------------------------
+ewastools_qc <- function(basenames     = NULL,
+                         targets       = NULL,
+                         raw_dir       = NULL,
+                         grn_col       = "grnFile",
+                         bisulfite_min = 1,
+                         chunk_size    = 75,
+                         check_magic   = TRUE,
+                         out_csv       = NULL) {
+
+  basenames <- resolve_basenames(basenames, targets, raw_dir, grn_col)
+  if (is.null(basenames) || !length(basenames))
+    stop("ewastools_qc(): no basenames; supply `basenames` or `targets` (+ raw_dir/grn_col).")
+
+  corrupt_samples <- character(0)
+  if (isTRUE(check_magic)) {
+    ok <- vapply(paste0(basenames, "_Grn.idat"), idat_has_valid_magic, logical(1)) &
+          vapply(paste0(basenames, "_Red.idat"), idat_has_valid_magic, logical(1))
+    if (any(!ok)) {
+      corrupt_samples <- basename(basenames[!ok])
+      warning(sum(!ok), " sample(s) have a corrupt IDAT file (bad magic header); ",
+              "flagged as corrupt_idat_file (other metrics NA):\n  ",
+              paste(head(corrupt_samples, 10), collapse = "\n  "))
+      basenames <- basenames[ok]
+    }
+  }
+  if (!length(basenames)) stop("ewastools_qc(): no valid idats left after magic-header check.")
+
+  if (is.null(chunk_size) || !is.finite(chunk_size) || chunk_size < 1)
+    chunk_size <- length(basenames)
+  groups <- split(seq_along(basenames),
+                  ceiling(seq_along(basenames) / chunk_size))
+
+  message(sprintf("[ewastools_qc] %d samples in %d chunk(s) of up to %d",
+                  length(basenames), length(groups), chunk_size))
+
+  parts <- vector("list", length(groups))
+  for (i in seq_along(groups)) {
+    bn   <- basenames[groups[[i]]]
+    meth <- read_idats(bn)
+    ctrl <- control_metrics(meth)
+    failed <- safe_sample_failure(ctrl)
+
+    bis_names <- grep("bisulfite", names(ctrl), ignore.case = TRUE, value = TRUE)
+    if (length(bis_names)) {
+      bis_mat <- do.call(cbind, lapply(bis_names, function(n) ctrl[[n]]))
+      bis_min <- apply(bis_mat, 1, min, na.rm = TRUE)
+    } else {
+      if (i == 1L) warning("No bisulfite-conversion metric found in control_metrics().")
+      bis_min <- rep(NA_real_, length(failed))
+    }
+    metrics_df <- as.data.frame(lapply(ctrl, round, 3))   # 17 columns, one row per sample
+    parts[[i]] <- cbind(data.frame(sample = basename(bn),
+             bisulfite_min     = round(bis_min, 2),
+             fail_bisulfite    = bis_min < bisulfite_min,
+             fail_control      = failed,
+             corrupt_idat_file = FALSE,
+             stringsAsFactors = FALSE),
+            metrics_df)
+    message(sprintf("  chunk %d/%d done (%d samples)", i, length(groups), length(bn)))
+    rm(meth, ctrl); gc()
+  }
+
+  out <- do.call(rbind, parts)
+
+  if (length(corrupt_samples)) {
+    na_metrics <- as.data.frame(matrix(NA_real_,
+                                       nrow = length(corrupt_samples),
+                                       ncol = ncol(metrics_df),
+                                       dimnames = list(NULL, names(metrics_df))))
+    corrupt_rows <- cbind(data.frame(sample            = corrupt_samples,
+             bisulfite_min     = NA_real_,
+             fail_bisulfite    = NA,
+             fail_control      = NA,
+             corrupt_idat_file = TRUE,
+             stringsAsFactors = FALSE),
+            na_metrics)
+    out <- rbind(out, corrupt_rows)
+  }
+
+  if (!is.null(out_csv)) {
+    dir.create(dirname(out_csv), recursive = TRUE, showWarnings = FALSE)
+    write.csv(out, out_csv, row.names = FALSE)
+    message("[ewastools_qc] wrote ", out_csv)
+  }
+  out
+}
+
+# ---------------------------------------------------------------------------
+# beadcount_from_rgset(): per-CpG functional bead counts from a compiled
+# RGChannelSetExtended (i.e. one read with extended = TRUE in
+# read_cohort_idats()). Type II probes use their single address; Type I
+# probes use the minimum bead count across AddressA and AddressB (both bead
+# types are required). Returns a CpG x sample matrix. Runs directly off the
+# already-compiled .rds -- no separate re-read of the raw idats needed.
+#
+#   Example:
+#     bc            <- beadcount_from_rgset(rg)          # CpG x samples
+#     frac_low_bead <- colMeans(bc < 3, na.rm = TRUE)     # per-sample metric
+# ---------------------------------------------------------------------------
+beadcount_from_rgset <- function(rg) {
+  stopifnot(is(rg, "RGChannelSetExtended"))
+  nb  <- getNBeads(rg)                                 # addresses x samples
+  rn  <- rownames(nb)
+  tI  <- getProbeInfo(rg, type = "I")
+  tII <- getProbeInfo(rg, type = "II")
+  bcII <- nb[match(as.character(tII$AddressA), rn), , drop = FALSE]
+  rownames(bcII) <- tII$Name
+  bcI <- pmin(nb[match(as.character(tI$AddressA), rn), , drop = FALSE],
+              nb[match(as.character(tI$AddressB), rn), , drop = FALSE])
+  rownames(bcI) <- tI$Name
+  rbind(bcI, bcII)
+}
+
+# ---------------------------------------------------------------------------
+# sample_qc(): minfi per-sample QC flags + merge of ewastools flags.
+#
+# The RGChannelSet is obtained: `rg` if supplied > `rds` if it exists.
+# sample_qc() no longer reads raw idats itself -- run ewastools_qc() separately
+# and pass its result as `ewastools_tab` (or a CSV path via `ewastools_csv`).
+#
+#   rg             RGChannelSet (annotation set); if supplied, `rds` is ignored
+#   rds            path to an existing combined-idat RGChannelSet .rds
+#   ewastools_tab  data.frame from ewastools_qc() (sample, bisulfite_min,
+#                  fail_bisulfite, fail_control). If NULL, those flags = NA.
+#   ewastools_csv  alternative to ewastools_tab: path to the CSV it wrote
 #   sex_col        pData column with reported sex ("female"/"male"/...)
 #   detp           per-probe detection-p threshold (probe "fails" above this)
 #   max_fail_frac  flag sample if > this fraction of probes fail detection
 #   min_intensity  flag sample if median log2 (M+U)/2 intensity below this
-#   bisulfite_min  flag sample if any bisulfite-conversion metric < this
+#   min_beadcount        per-probe bead-count threshold (probe "fails" below this)
+#   max_beadcount_frac   flag sample if > this fraction of probes fail bead-count.
+#                        Requires rg to be an RGChannelSetExtended (extended =
+#                        TRUE in read_cohort_idats()); fail_beadcount = NA otherwise.
 #   out_prefix     prefix for the output CSV (plots are in render_qc_plots())
 #
 # Example:
-#   manifest <- read.csv(cfg$manifest, stringsAsFactors = FALSE)
-#   manifest$Basename <- file.path(cfg$raw_dir, sub("_Grn\\.idat$", "", manifest$grnFile))
-#
-#   res <- sample_qc(rg_msbb, sex_col = "sex",
-#                    basenames = manifest$Basename, out_prefix = "MSBB")
-#
+#   ew  <- ewastools_qc(targets = manifest, raw_dir = cfg$raw_dir,
+#                       out_csv = paste0(cfg$out_prefix, "_ewastools.csv"))
+#   res <- sample_qc(rg, sex_col = "sex", ewastools_tab = ew,
+#                    out_prefix = cfg$out_prefix)
 #   res$qc_tab[res$qc_tab$any_flag, c("sample","flag_reason")]  # who & why
-#
-#   # YOU decide what to remove, e.g. drop only technical failures:
-#   keep <- !(res$qc_tab$fail_detp | res$qc_tab$fail_intensity | res$qc_tab$sex_mismatch)
-#   rg_clean <- res$rg[, keep]
-#
-# Example (loading a compiled rds instead of passing `rg` directly):
-#   res <- sample_qc(rds = "/…/MSBB/combined_idat/MSBB.rds",
-#                    targets = manifest, raw_dir = cfg$raw_dir,
-#                    sex_col = "sex", out_prefix = "MSBB")
 # ---------------------------------------------------------------------------
-sample_qc <- function(rg            = NULL,
-                      rds           = NULL,
-                      targets       = NULL,
-                      raw_dir       = NULL,
-                      grn_col       = "grnFile",
-                      basenames     = NULL,
-                      sex_col       = "sex",
-                      detp          = 0.01,
-                      max_fail_frac = 0.01,
-                      min_intensity = 10.5,
-                      bisulfite_min = 1,
-                      out_prefix    = "cohort") {
+sample_qc <- function(rg                  = NULL,
+                      rds                 = NULL,
+                      ewastools_tab       = NULL,
+                      ewastools_csv       = NULL,
+                      sex_col             = "sex",
+                      detp                = 0.01,
+                      max_fail_frac       = 0.01,
+                      min_intensity       = 10.5,
+                      min_beadcount       = 3,
+                      max_beadcount_frac  = 0.01,
+                      out_prefix          = "cohort") {
 
   ## --- obtain the RGChannelSet: object > existing rds ---------------------
   if (is.null(rg)) {
@@ -100,29 +271,18 @@ sample_qc <- function(rg            = NULL,
       message("[sample_qc] using existing combined-idat rds: ", rds)
       rg <- readRDS(rds)
     } else {
-      stop("Provide `rg` or an existing `rds` (as written by compile_idat_files.R); ",
-           "sample_qc() does not build RGChannelSets from raw idats.")
+      stop("Provide `rg` or an existing `rds` (as written by compile_idat_files.R).")
     }
   }
-  ## if we loaded an rds (or were handed rg) and only a manifest is available,
-  ## build ewastools Basenames from raw_dir + grn_col
-  if (is.null(basenames) && !is.null(targets) && !is.null(raw_dir)) {
-    tgm <- as.data.frame(targets, stringsAsFactors = FALSE)
-    if (grn_col %in% names(tgm)) {
-      tgm <- tgm[!is.na(tgm[[grn_col]]) & nzchar(tgm[[grn_col]]), ]
-      basenames <- file.path(raw_dir, sub("_Grn\\.idat$", "", tgm[[grn_col]]))
-    } else if ("Basename" %in% names(tgm)) {
-      basenames <- tgm$Basename
-    }
-  }
-
   stopifnot(is(rg, "RGChannelSet"))
   pd <- as.data.frame(pData(rg))
 
-  ## detection p-values ------------------------------------------------------
-  ## minfi:: qualified -- ewastools also exports detectionP() (for its own
-  ## read_idats() objects), and it masks minfi's version since ewastools is
-  ## library()'d after minfi above.
+  ## optional: load ewastools table from CSV -------------------------------
+  if (is.null(ewastools_tab) && !is.null(ewastools_csv) && file.exists(ewastools_csv))
+    ewastools_tab <- read.csv(ewastools_csv, stringsAsFactors = FALSE)
+
+  ## detection p-values ----------------------------------------------------
+  ## minfi:: qualified -- ewastools also exports detectionP() and masks minfi's.
   detP        <- minfi::detectionP(rg)
   frac_failed <- colMeans(detP > detp)
   mean_detP   <- colMeans(detP)
@@ -143,31 +303,30 @@ sample_qc <- function(rg            = NULL,
   }
   sex_mismatch <- !is.na(reported_sex) & reported_sex != predicted_sex
 
-  ## ewastools control metrics ---------------------------------------------
+  ## bead-count QC (requires RGChannelSetExtended; NA if compiled without
+  ## extended = TRUE in read_cohort_idats()) ------------------------------
+  if (is(rg, "RGChannelSetExtended")) {
+    bc            <- beadcount_from_rgset(rg)
+    frac_low_bead <- colMeans(bc < min_beadcount, na.rm = TRUE)[colnames(rg)]
+  } else {
+    message("[sample_qc] rg is not an RGChannelSetExtended; bead-count QC ",
+            "skipped (fail_beadcount = NA). Re-compile with extended = TRUE ",
+            "in read_cohort_idats() to enable it.")
+    frac_low_bead <- rep(NA_real_, ncol(rg))
+  }
+
+  ## ewastools flags: merged from ewastools_qc() output, matched by sample --
   fail_bisulfite    <- rep(NA, ncol(rg))
   fail_control      <- rep(NA, ncol(rg))
   bisulfite_min_val <- rep(NA_real_, ncol(rg))
-
-  if (!is.null(basenames)) {
-    ord <- match(colnames(rg), basename(basenames))
-    if (anyNA(ord))
-      warning(sum(is.na(ord)), " sample(s) in rg not found in `basenames`; ",
-              "their ewastools flags will be NA.")
-    meth <- read_idats(basenames)
-    ctrl <- control_metrics(meth)
-    ctrl_failed <- sample_failure(ctrl)
-
-    bis_names <- grep("bisulfite", names(ctrl), ignore.case = TRUE, value = TRUE)
-    if (length(bis_names)) {
-      bis_mat <- do.call(cbind, lapply(bis_names, function(n) ctrl[[n]]))
-      bis_min <- apply(bis_mat, 1, min, na.rm = TRUE)
-    } else {
-      warning("No bisulfite-conversion metric found in control_metrics().")
-      bis_min <- rep(NA_real_, length(ctrl_failed))
-    }
-    bisulfite_min_val <- bis_min[ord]
-    fail_bisulfite    <- bis_min[ord] < bisulfite_min
-    fail_control      <- ctrl_failed[ord]
+  if (!is.null(ewastools_tab)) {
+    m <- match(colnames(rg), ewastools_tab$sample)
+    if (anyNA(m))
+      warning(sum(is.na(m)), " sample(s) in rg not found in `ewastools_tab`; ",
+              "their ewastools flags stay NA.")
+    bisulfite_min_val <- ewastools_tab$bisulfite_min[m]
+    fail_bisulfite    <- ewastools_tab$fail_bisulfite[m]
+    fail_control      <- ewastools_tab$fail_control[m]
   }
 
   ## Assemble QC table: ALL checks are flags -------------------------------
@@ -179,11 +338,13 @@ sample_qc <- function(rg            = NULL,
     predicted_sex  = predicted_sex,
     reported_sex   = reported_sex,
     bisulfite_min  = round(bisulfite_min_val, 2),
+    frac_low_bead  = round(frac_low_bead, 4),
     fail_detp      = frac_failed  > max_fail_frac,
     fail_intensity = qc_intensity < min_intensity,
     sex_mismatch   = sex_mismatch,
     fail_bisulfite = fail_bisulfite,
     fail_control   = fail_control,
+    fail_beadcount = frac_low_bead > max_beadcount_frac,
     stringsAsFactors = FALSE
   )
 
@@ -193,7 +354,8 @@ sample_qc <- function(rg            = NULL,
     intensity = qc_tab$fail_intensity %in% TRUE,
     sex       = qc_tab$sex_mismatch   %in% TRUE,
     bisulfite = qc_tab$fail_bisulfite %in% TRUE,
-    control   = qc_tab$fail_control   %in% TRUE
+    control   = qc_tab$fail_control   %in% TRUE,
+    beadcount = qc_tab$fail_beadcount %in% TRUE
   )
   qc_tab$flag_reason <- apply(flag_mat, 1, function(x) {
     r <- colnames(flag_mat)[x]; if (length(r)) paste(r, collapse = ";") else "none"
@@ -206,11 +368,11 @@ sample_qc <- function(rg            = NULL,
 
   ## report + return (NOTHING dropped) ------------------------------------
   message(sprintf(
-    "[%s] %d samples | flagged: %d (detP %d, intensity %d, sex %d, bisulfite %d, control %d)",
+    "[%s] %d samples | flagged: %d (detP %d, intensity %d, sex %d, bisulfite %d, control %d, beadcount %d)",
     out_prefix, nrow(qc_tab), sum(qc_tab$any_flag),
     sum(qc_tab$fail_detp %in% TRUE), sum(qc_tab$fail_intensity %in% TRUE),
     sum(qc_tab$sex_mismatch %in% TRUE), sum(qc_tab$fail_bisulfite %in% TRUE),
-    sum(qc_tab$fail_control %in% TRUE)))
+    sum(qc_tab$fail_control %in% TRUE), sum(qc_tab$fail_beadcount %in% TRUE)))
 
   dir.create(dirname(out_prefix), recursive = TRUE, showWarnings = FALSE)
   write.csv(qc_tab, paste0(out_prefix, "_sample_qc.csv"), row.names = FALSE)
@@ -237,7 +399,6 @@ sample_qc <- function(rg            = NULL,
 # Pass qc_tab (from sample_qc()) so the flagged set is known; the control-probe
 # report is then restricted to those samples instead of the whole cohort.
 # Example usage:
-# res <- sample_qc(rg, sex_col = "sex", basenames = manifest$Basename, out_prefix = "MSBB")
 # render_qc_plots(res$rg, cohort = "MSBB",
 #                 out_dir = "/…/Results/QC/raw_values",
 #                 qc_tab  = res$qc_tab)         # flagged_qcReport uses any_flag
@@ -248,14 +409,16 @@ sample_qc <- function(rg            = NULL,
 # ============================================================================
 
 render_qc_plots <- function(rg,
-                            cohort        = "Cohort",
-                            out_dir       = ".",
-                            file_prefix   = cohort,
-                            qc_tab        = NULL,           # from sample_qc(); needed for flagged report
-                            flag_col      = "any_flag",     # which flag defines "to be dropped"
-                            detp          = 0.01,
-                            max_fail_frac = 0.01,
-                            min_intensity = 10.5,
+                            cohort             = "Cohort",
+                            out_dir            = ".",
+                            file_prefix        = cohort,
+                            qc_tab             = NULL,      # from sample_qc(); needed for flagged report
+                            flag_col           = "any_flag", # which flag defines "to be dropped"
+                            detp               = 0.01,
+                            max_fail_frac      = 0.01,
+                            min_intensity      = 10.5,
+                            min_beadcount      = 3,
+                            max_beadcount_frac = 0.01,
                             sex_col       = "sex",
                             titles = list(
                               qc      = paste0(cohort, ": Median Methylated vs Unmethylated Intensity"),
@@ -274,7 +437,17 @@ render_qc_plots <- function(rg,
   qc_int      <- (qc$mMed + qc$uMed) / 2
   detP        <- minfi::detectionP(rg)   # ewastools also exports detectionP(); qualify to avoid masking
   frac_failed <- colMeans(detP > detp)
-  bad         <- qc_int < min_intensity | frac_failed > max_fail_frac
+
+  ## bead-count QC (requires RGChannelSetExtended; skipped otherwise) ------
+  if (is(rg, "RGChannelSetExtended")) {
+    bc             <- beadcount_from_rgset(rg)
+    frac_low_bead  <- colMeans(bc < min_beadcount, na.rm = TRUE)[colnames(rg)]
+    fail_beadcount <- frac_low_bead > max_beadcount_frac
+  } else {
+    fail_beadcount <- rep(NA, ncol(rg))
+  }
+
+  bad <- qc_int < min_intensity | frac_failed > max_fail_frac | fail_beadcount %in% TRUE
 
   gmset <- mapToGenome(mset)
   sx    <- getSex(gmset)                       # xMed, yMed, predictedSex
@@ -297,7 +470,7 @@ render_qc_plots <- function(rg,
          ylab = "Median unmethylated intensity (log2)", main = titles$qc)
     abline(a = 2 * min_intensity, b = -1, lty = 2, col = "grey50")
     legend("topleft", bty = "n", pch = 21, pt.bg = c(pal_ok, pal_bad), col = "grey30",
-           legend = c("pass", sprintf("low intensity / detP fail")))
+           legend = c("pass", "low intensity / detP / bead-count fail"))
     mtext(sprintf("n = %d samples", ncol(rg)), side = 3, line = 0.2, cex = 0.85, col = "grey40")
   }
 
@@ -375,9 +548,3 @@ render_qc_plots <- function(rg,
   invisible(list(qc = qc, frac_failed = frac_failed, bad = bad,
                  predicted_sex = pred, sex_mismatch = mism))
 }
-
-# ---------------------------------------------------------------------------
-
-
-
-

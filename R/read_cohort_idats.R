@@ -1,4 +1,3 @@
-
 library(minfi)
 
 # ---------------------------------------------------------------------------
@@ -27,19 +26,48 @@ idat_has_valid_magic <- function(path) {
 #   recursive    search idat_dir subfolders (TRUE if idats are in per-chip dirs)
 #   force        TRUE lets minfi bind arrays whose manifests differ slightly;
 #                safe within one platform and avoids spurious read failures.
+#   extended     TRUE (default) reads into an RGChannelSetExtended, which also
+#                carries the per-probe bead counts (NBeads) and bead SDs. This
+#                lets bead-count QC (probes measured by < 3 functional beads)
+#                run off the compiled .rds directly, with no separate re-read
+#                of the raw idats. It is a subclass of RGChannelSet, so all
+#                downstream minfi steps (preprocessRaw, detectionP, getSex,
+#                preprocessNoob, ...) work unchanged. Trade-off: the extended
+#                object / .rds is larger (adds the NBeads + SD assays), so set
+#                extended = FALSE if you don't need bead QC and want to save
+#                memory/disk.
+#   chunk_size   read.metharray.exp() loads every listed sample's raw idats
+#                into memory at once before assembling the RGChannelSet -- on
+#                large cohorts that's what gets the compile step killed by the
+#                OOM killer. If set, samples are instead read chunk_size at a
+#                time and the chunks combined with cbind() as they complete,
+#                bounding peak memory to one chunk's raw idats. NULL (default)
+#                = read everything in a single call (original behavior).
 # ---------------------------------------------------------------------------
 read_cohort_idats <- function(idat_dir,
                               sample_sheet = NULL,
                               sentrix_col  = "Sentrix_ID",
                               recursive    = TRUE,
-                              force        = TRUE) {
+                              force        = TRUE,
+                              extended     = TRUE,
+                              chunk_size   = NULL) {
 
   if (is.null(sample_sheet)) {
-    # --- read every idat pair found under idat_dir ---
-    rg <- read.metharray.exp(base = idat_dir,
-                             recursive = recursive,
-                             force = force,
-                             verbose = TRUE)
+    if (is.null(chunk_size)) {
+      # --- read every idat pair found under idat_dir, in one call ---
+      return(read.metharray.exp(base = idat_dir,
+                                recursive = recursive,
+                                extended = extended,
+                                force = force,
+                                verbose = TRUE))
+    }
+
+    # Chunking needs an explicit sample list -- build one from the idat pairs
+    # found under idat_dir instead of handing base= to read.metharray.exp().
+    grn_files <- list.files(idat_dir, pattern = "_Grn\\.idat$",
+                            recursive = recursive, full.names = TRUE)
+    ss <- data.frame(Basename = sub("_Grn\\.idat$", "", grn_files),
+                     stringsAsFactors = FALSE)
   } else {
     # --- read only the samples listed in sample_sheet ---
     ss <- as.data.frame(sample_sheet, stringsAsFactors = FALSE)
@@ -70,9 +98,33 @@ read_cohort_idats <- function(idat_dir,
               paste(head(ss$Basename[corrupt], 10), collapse = "\n  "))
       ss <- ss[!corrupt, , drop = FALSE]
     }
+  }
 
-    rg <- read.metharray.exp(targets = ss, force = force, verbose = TRUE)
+  if (is.null(chunk_size) || !is.finite(chunk_size) || chunk_size < 1 || chunk_size >= nrow(ss)) {
+    return(read.metharray.exp(targets = ss, extended = extended,
+                              force = force, verbose = TRUE))
+  }
+
+  # --- chunked read: read + cbind chunk_size samples at a time, so peak
+  # memory is bounded to one chunk's raw idats instead of the whole cohort's ---
+  groups <- split(seq_len(nrow(ss)), ceiling(seq_len(nrow(ss)) / chunk_size))
+  message(sprintf("[read_cohort_idats] %d samples in %d chunk(s) of up to %d",
+                  nrow(ss), length(groups), chunk_size))
+
+  rg <- NULL
+  for (i in seq_along(groups)) {
+    chunk <- ss[groups[[i]], , drop = FALSE]
+    message(sprintf("  chunk %d/%d (%d samples)", i, length(groups), nrow(chunk)))
+    rg_chunk <- read.metharray.exp(targets = chunk, extended = extended,
+                                   force = force, verbose = TRUE)
+    rg <- if (is.null(rg)) rg_chunk else cbind(rg, rg_chunk)
+    rm(rg_chunk); gc()
   }
 
   rg
 }
+
+# NOTE: bead-count QC (beadcount_from_rgset(), which turns the NBeads assay
+# enabled by extended = TRUE above into per-sample fail_beadcount flags) now
+# lives in R/sample_qc.R, alongside the other QC-flag logic (ewastools_qc(),
+# sample_qc()).

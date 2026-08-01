@@ -14,66 +14,26 @@
 #   Rscript compile_idat_files.R MSBB ROSMAP
 #                                          # process only the named cohort(s)
 #   Rscript compile_idat_files.R \
-#     "NewCohort:/raw/dir:/path/manifest.csv:/path/out_dir"
-#                                          # run a cohort not hardcoded below
+#     "NewCohort:/raw/dir:/path/manifest.csv:/path/combined_dir:/path/individual.csv:/path/qc_dir"
+#                                          # run a cohort not in R/cohort_config.R
+#                                          # (individual_csv/qc_dir are unused here
+#                                          # but required for cohorts_all.R's shared
+#                                          # config shape -- see sample_level_QC.R)
+#
+# Cohort paths (raw_dir, manifest, combined_dir) live in R/cohort_config.R,
+# shared with sample_level_QC.R so the two stages can't drift apart.
 # ============================================================================
 
 library(minfi)
 source('/home/ec2-user/AMP-AD_methylation_harmonization/R/read_cohort_idats.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
 
-cohorts_all <- list(
-  MSBB = list(
-    raw_dir  = '/home/ec2-user/data/methyl_harmonization/methyl_data/MSBB/raw_data',
-    manifest = '/home/ec2-user/data/methyl_harmonization/MSBB/metadata/MSBB_idat_manifest.csv',
-    out_dir  = '/home/ec2-user/data/methyl_harmonization/MSBB/combined_idat/'
-  ),
-  ROSMAP = list(
-    raw_dir  = '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP/raw_data',
-    manifest = '/home/ec2-user/data/methyl_harmonization/ROSMAP/metadata/ROSMAP_idat_manifest.csv',
-    out_dir  = '/home/ec2-user/data/methyl_harmonization/ROSMAP/combined_idat/'
-  ),
-  ROSMAP_APOE4 = list(
-    raw_dir  = '/home/ec2-user/data/methyl_harmonization/methyl_data/ROSMAP_APOE4/raw_data',
-    manifest = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/metadata/ROSMAP_APOE4_idat_manifest.csv',
-    out_dir  = '/home/ec2-user/data/methyl_harmonization/ROSMAP_APOE4/combined_idat/'
-  ),
-  `MOA-PAD` = list(
-    raw_dir  = '/home/ec2-user/data/methyl_harmonization/methyl_data/MOA-PAD/raw_data',
-    manifest = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/metadata/MOA-PAD_idat_manifest.csv',
-    out_dir  = '/home/ec2-user/data/methyl_harmonization/MOA-PAD/combined_idat/'
-  )
-)
+cohorts <- select_cohorts(commandArgs(trailingOnly = TRUE))
 
-# Select which cohort(s) to process from the command line; default to all
-# built-in cohorts. Each arg is either:
-#   - a name from cohorts_all (e.g. "MSBB"), or
-#   - an ad-hoc spec "NAME:RAW_DIR:MANIFEST:OUT_DIR" for a cohort not
-#     (yet) hardcoded above, so new cohorts can be run without editing this file.
-
-requested <- commandArgs(trailingOnly = TRUE)
-
-if (length(requested) == 0) {
-  cohorts <- cohorts_all
-} else {
-  cohorts <- list()
-  for (arg in requested) {
-    if (grepl(":", arg, fixed = TRUE)) {
-      parts <- strsplit(arg, ":", fixed = TRUE)[[1]]
-      if (length(parts) != 4) {
-        stop("Ad-hoc cohort spec must be 'NAME:RAW_DIR:MANIFEST:OUT_DIR', got: ", arg)
-      }
-      cohorts[[parts[1]]] <- list(raw_dir = parts[2], manifest = parts[3], out_dir = parts[4])
-    } else if (arg %in% names(cohorts_all)) {
-      cohorts[[arg]] <- cohorts_all[[arg]]
-    } else {
-      stop("Unknown cohort '", arg, "'. Valid built-in options: ",
-           paste(names(cohorts_all), collapse = ", "),
-           ". To run a cohort not listed above, pass 'NAME:RAW_DIR:MANIFEST:OUT_DIR'.")
-    }
-  }
-}
-
-rg_sets <- list()
+# Samples per read.metharray.exp() call -- bounds peak memory on large
+# cohorts so the compile step doesn't get OOM-killed (see chunk_size doc in
+# read_cohort_idats()).
+chunk_size <- 75
 
 for (cohort_name in names(cohorts)) {
   cfg <- cohorts[[cohort_name]]
@@ -93,11 +53,12 @@ for (cohort_name in names(cohorts)) {
   # (e.g. ROSMAP) are preserved.
   manifest$Basename <- file.path(cfg$raw_dir, sub('_Grn\\.idat$', '', manifest$grnFile))
 
-  rg <- read_cohort_idats(idat_dir = cfg$raw_dir, sample_sheet = manifest)
+  rg <- read_cohort_idats(idat_dir = cfg$raw_dir, sample_sheet = manifest,
+                          chunk_size = chunk_size)
 
   cat(cohort_name, "RGChannelSet:", ncol(rg), "samples,", nrow(rg), "probes\n")
 
-  dir.create(cfg$out_dir, recursive = TRUE, showWarnings = FALSE)
-  saveRDS(rg, file.path(cfg$out_dir, paste0(cohort_name, '.rds')))
-  rg_sets[[cohort_name]] <- rg
+  dir.create(cfg$combined_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(rg, file.path(cfg$combined_dir, paste0(cohort_name, '.rds')))
+  rm(rg); gc()
 }

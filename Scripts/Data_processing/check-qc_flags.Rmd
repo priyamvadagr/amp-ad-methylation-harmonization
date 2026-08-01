@@ -1,0 +1,138 @@
+---
+title: "QC Flag Diagnostics: Control-Probe Failures by Cohort"
+subtitle: "Which ewastools control metrics drive control-only sample flags"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = TRUE
+)
+options(width = 120)
+```
+
+```{r helper}
+base_dir <- "/home/ec2-user/data/methyl_harmonization"
+
+## Runs the control-only diagnostic for one cohort and returns a list of
+## tables. `sample_qc.csv` and `<cohort>_ewastools.csv` live under
+## <base_dir>/<cohort>/qc/. Returns NULL (with a message) if the ewastools
+## CSV hasn't been generated yet, or if no sample has flag_reason == "control"
+## exactly (control failure can also show up combined with other flags,
+## e.g. "bisulfite;control" -- those are reported separately below, not
+## counted as control-only).
+analyze_control_only <- function(cohort, base_dir) {
+  qc_csv <- file.path(base_dir, cohort, "qc", paste0(cohort, "_sample_qc.csv"))
+  ew_csv <- file.path(base_dir, cohort, "qc", paste0(cohort, "_ewastools.csv"))
+
+  if (!file.exists(qc_csv)) {
+    message("[", cohort, "] missing sample_qc.csv: ", qc_csv)
+    return(invisible(NULL))
+  }
+  if (!file.exists(ew_csv)) {
+    message("[", cohort, "] missing ewastools.csv (run phase=ewastools first): ", ew_csv)
+    return(invisible(NULL))
+  }
+
+  qc <- read.csv(qc_csv, stringsAsFactors = FALSE)
+  ew <- read.csv(ew_csv, stringsAsFactors = FALSE, check.names = FALSE)
+
+  cat("flag_reason distribution:\n")
+  print(sort(table(qc$flag_reason), decreasing = TRUE))
+
+  ## 1. control-only samples (flag_reason is exactly "control")
+  control_only <- qc$sample[qc$flag_reason == "control"]
+  cat("\n", length(control_only), "control-only samples\n")
+  if (length(control_only) == 0) {
+    message("[", cohort, "] no samples with flag_reason == 'control' exactly ",
+            "(control failures may only occur combined with other flags here)")
+    return(invisible(list(qc = qc, ew = ew, control_only = control_only)))
+  }
+
+  ## 2. metric columns + thresholds (5 = intensity controls, 0 = restoration, else 1)
+  non_metric  <- c("sample", "bisulfite_min", "fail_bisulfite", "fail_control")
+  metric_cols <- setdiff(names(ew), non_metric)
+  thr <- ifelse(grepl("Staining|Extension|Non.?polymorphic", metric_cols, ignore.case = TRUE), 5,
+         ifelse(grepl("Restoration", metric_cols, ignore.case = TRUE), 0, 1))
+  names(thr) <- metric_cols
+
+  ## 3. which metric(s) fall below threshold, per control-only sample
+  sub <- ew[ew$sample %in% control_only, , drop = FALSE]
+  mat <- sapply(metric_cols, function(cn) sub[[cn]] < thr[cn])
+  if (is.null(dim(mat))) mat <- matrix(mat, nrow = nrow(sub), dimnames = list(NULL, metric_cols))
+  rownames(mat) <- sub$sample
+
+  reasons <- apply(mat, 1, function(x) paste(metric_cols[which(x)], collapse = ";"))
+  out <- data.frame(sample = sub$sample, failed_metric = reasons, stringsAsFactors = FALSE)
+
+  ## 4. tally: which metrics drive the control-only drops
+  tally <- sort(table(unlist(strsplit(reasons, ";"))), decreasing = TRUE)
+
+  ## 5. batch/site clustering among control-only failures (prefix before first "_")
+  top_prefix <- sort(table(sub("_.*", "", sub$sample)), decreasing = TRUE)
+
+  list(
+    qc            = qc,
+    ew            = ew,
+    control_only  = control_only,
+    out           = out,
+    tally         = tally,
+    nonpoly_green = summary(sub$Non.polymorphic.Green),
+    top_prefix    = head(top_prefix, 10)
+  )
+}
+
+print_results <- function(res) {
+  if (is.null(res) || length(res$control_only) == 0) return(invisible(NULL))
+
+  cat("\n## failed metric per control-only sample\n")
+  print(res$out, row.names = FALSE)
+
+  cat("\n## tally of metrics driving control-only drops\n")
+  print(res$tally)
+
+  cat("\n## summary(Non.polymorphic.Green) among control-only samples\n")
+  print(res$nonpoly_green)
+
+  cat("\n## top sample-prefix counts among control-only samples\n")
+  print(res$top_prefix)
+}
+```
+
+# ROSMAP
+
+```{r ROSMAP, echo = FALSE}
+res_rosmap <- analyze_control_only("ROSMAP", base_dir)
+print_results(res_rosmap)
+```
+All flags (n=78) were driven by Non-polymorphic Green marginally below the Illumina cutoff (range 3.95–5.0) with no other QC failure, 
+consistent with a systematic control-probe artifact rather than sample failure.
+
+# ROSMAP_APOE4
+
+```{r ROSMAP_APOE4, echo = FALSE}
+res_rosmap_apoe4 <- analyze_control_only("ROSMAP_APOE4", base_dir)
+print_results(res_rosmap_apoe4)
+```
+
+# MSBB
+
+```{r MSBB, echo = FALSE}
+res_msbb <- analyze_control_only("MSBB", base_dir)
+print_results(res_msbb)
+```
+
+# MOA-PAD
+
+```{r MOA-PAD, echo = FALSE}
+res_moapad <- analyze_control_only("MOA-PAD", base_dir)
+print_results(res_moapad)
+```
