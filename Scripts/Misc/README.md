@@ -1,0 +1,3 @@
+# Misc
+
+- **get_sample_info.Rmd** — Per-cohort (MSBB, ROSMAP, ROSMAP_APOE4, MOA-PAD) reconciliation of methylation array metadata against raw IDAT files. For each cohort: merges assay/biospecimen/individual metadata, harmonizes MOA-PAD's individual metadata to the ADKP data dictionary (`../functions/harmonize_metadata.R`), cross-checks which samples have both metadata and Grn/Red IDAT files present (Venn diagram of overlap), writes the processed metadata CSVs, and builds the specimen<->IDAT-file manifest (`../functions/build_idat_manifest.R`) consumed by `Scripts/Data_processing/compile_idat_files.R` and `sample_level_QC.R`. Also renders per-cohort demographic summary tables.

@@ -387,7 +387,8 @@ sample_qc <- function(rg                  = NULL,
 # render_qc_plots(): render sample-QC figures from a saved RGChannelSet, with
 # customizable titles.
 #
-# Produces, in <out_dir>/<cohort>/, one PDF and one PNG per panel:
+# Produces, in <out_dir>/<subdir>/ (subdir defaults to cohort), one PDF and
+# one PNG per panel:
 #   <file_prefix>_qc_intensity.{pdf,png}         intensity QC scatter
 #   <file_prefix>_beta_density.{pdf,png}         beta-value density
 #   <file_prefix>_failed_fraction_hist.{pdf,png} failed-probe histogram
@@ -411,6 +412,7 @@ sample_qc <- function(rg                  = NULL,
 render_qc_plots <- function(rg,
                             cohort             = "Cohort",
                             out_dir            = ".",
+                            subdir             = cohort,    # <out_dir>/<subdir>/ is where plots land
                             file_prefix        = cohort,
                             qc_tab             = NULL,      # from sample_qc(); needed for flagged report
                             flag_col           = "any_flag", # which flag defines "to be dropped"
@@ -458,7 +460,7 @@ render_qc_plots <- function(rg,
   } else rep(NA_character_, ncol(rg))
   mism <- !is.na(rep_sex) & rep_sex != pred
 
-  cohort_dir <- file.path(out_dir, cohort)
+  cohort_dir <- file.path(out_dir, subdir)
   dir.create(cohort_dir, showWarnings = FALSE, recursive = TRUE)
   ## --- Panel 1: intensity QC scatter --------------------------------------
   plot_qc_intensity <- function() {

@@ -11,7 +11,9 @@
 #   individual_csv processed individual metadata CSV (used by sample_level_QC.R
 #                  to attach reported sex)
 #   qc_dir         where sample_level_QC.R writes <cohort>_ewastools.csv,
-#                  <cohort>_sample_qc.csv, <cohort>_qc.rds
+#                  <cohort>_sample_qc.csv, <cohort>_qc.rds (under qc_dir/sample_qc/)
+#                  and pca_qc_per_cohort.R writes <cohort>_pca.rds and friends
+#                  (under qc_dir/pca_qc/)
 #   normalized_dir where normalize_data.R writes <cohort>_noob_gmset.rds,
 #                  <cohort>_noob_beta.rds
 # ============================================================================

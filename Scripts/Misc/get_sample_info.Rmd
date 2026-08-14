@@ -37,8 +37,8 @@ library(dplyr)
 library(ggplot2)
 library(knitr)
 library(ggVennDiagram)
-source("/home/ec2-user/AMP-AD_methylation_harmonization/R/harmonize_metadata.R")
-source("/home/ec2-user/AMP-AD_methylation_harmonization/R/build_idat_manifest.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/harmonize_metadata.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/build_idat_manifest.R")
 ```
 ```{r demographics-helper, include=FALSE}
 # Summarize the core harmonized demographic columns for one cohort.
