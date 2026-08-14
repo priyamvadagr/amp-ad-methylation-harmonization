@@ -1,6 +1,6 @@
 # AMP-AD Methylation Harmonization
 
-Harmonization project for Illumina DNA methylation array data (450K/EPIC) across AMP-AD cohorts — **MSBB**, **ROSMAP**, **ROSMAP_APOE4**, and **MOA-PAD**. Takes each cohort from raw IDATs through a common QC, normalization, and probe-filtering process, and applies the Shireby CorticalClock DNAm-age predictor for downstream age-acceleration analysis.
+Harmonization project for Illumina DNA methylation array data across AMP-AD cohorts — **MSBB**, **ROSMAP**, **ROSMAP_APOE4**, and **MOA-PAD**. Takes each cohort from raw IDATs through a common QC, normalization, and probe-filtering process, and applies the Shireby CorticalClock DNAm-age predictor for downstream age-acceleration analysis.
 
 ## Pipeline
 
