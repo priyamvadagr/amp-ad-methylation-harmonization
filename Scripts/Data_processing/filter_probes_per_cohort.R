@@ -33,8 +33,8 @@
 # ============================================================================
 
 library(minfi)
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/filter_probes.R')
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/filter_probes.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/cohort_config.R')
 
 mask_dir <- '/home/ec2-user/data/methyl_harmonization/Zhou_mask_tables'
 

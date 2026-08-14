@@ -1,33 +1,46 @@
 # ============================================================================
-# Run sample_qc() + render_qc_plots() (see R/sample_qc.R) for each cohort's
-# saved RGChannelSet .rds, one cohort at a time. Each cohort's RGChannelSet
-# is dropped from memory (rm + gc) before the next one is loaded.
+# Re-render sample-QC plots (render_qc_plots(), Scripts/functions/sample_qc.R)
+# from the QC'd RGChannelSet + qc_tab that sample_level_QC.R already computed
+# and saved -- does NOT rerun sample_qc() itself. Rerunning sample_qc() here
+# would recompute the minfi checks from scratch AND lose the ewastools merge
+# (bisulfite/control flags), since this script has no access to the raw idats
+# sample_level_QC.R's ewastools phase reads.
 #
-# Per cohort, reads:
-#   <data_root>/<cohort>/combined_idat/<cohort>.rds
-# and writes:
-#   <data_root>/<cohort>/qc/<cohort>_sample_qc.csv        (sample_qc)
-#   <plot_root>/<cohort>/<cohort>_*.{pdf,png}             (render_qc_plots)
-#   <plot_root>/<cohort>/<cohort>_flagged_qcReport.pdf    (render_qc_plots)
+# Reads <qc_dir>/sample_qc/<cohort>_qc.rds and _sample_qc.csv (written by
+# sample_level_QC.R's minfi phase) and writes the plots into that SAME
+# directory, alongside the data files:
+#   <qc_dir>/sample_qc/<cohort>_*.{pdf,png}             (render_qc_plots)
+#   <qc_dir>/sample_qc/<cohort>_flagged_qcReport.pdf    (render_qc_plots)
+#
+# Usage:
+#   Rscript render_qc_plots.R                  # all cohorts
+#   Rscript render_qc_plots.R MSBB ROSMAP       # named cohorts only
+#   Rscript render_qc_plots.R \
+#     "NewCohort:/raw/dir:/path/manifest.csv:/path/combined_dir:/path/individual.csv:/path/qc_dir"
+#
+# Cohort paths (qc_dir) live in Scripts/functions/cohort_config.R, shared with
+# sample_level_QC.R so the two scripts can't drift apart.
 # ============================================================================
 
-source("/home/ec2-user/AMP-AD_methylation_harmonization/R/sample_qc.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/sample_qc.R")
+source("/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/cohort_config.R")
 
-data_root <- "/home/ec2-user/data/methyl_harmonization"
-plot_root <- "/home/ec2-user/AMP-AD_methylation_harmonization/Results/QC/raw_values"
+cohorts <- select_cohorts(commandArgs(trailingOnly = TRUE))
 
-cohorts <- c("ROSMAP", "ROSMAP_APOE4", "MSBB", "MOA-PAD")
+for (cohort_name in names(cohorts)) {
+  cfg <- cohorts[[cohort_name]]
+  cat("\n==== ", cohort_name, " ====\n")
 
-for (cohort in cohorts) {
+  sample_qc_dir <- file.path(cfg$qc_dir, "sample_qc")
+  qc_rds <- file.path(sample_qc_dir, paste0(cohort_name, "_qc.rds"))
+  qc_csv <- file.path(sample_qc_dir, paste0(cohort_name, "_sample_qc.csv"))
 
-  rds_file <- file.path(data_root, cohort, "combined_idat", paste0(cohort, ".rds"))
-  qc_dir   <- file.path(data_root, cohort, "qc")
-  dir.create(qc_dir, showWarnings = FALSE, recursive = TRUE)
+  rg     <- readRDS(qc_rds)
+  qc_tab <- read.csv(qc_csv, stringsAsFactors = FALSE)
 
-  rg  <- readRDS(rds_file)   # full object = original view
-  res <- sample_qc(rg, out_prefix = file.path(qc_dir, cohort))
-  render_qc_plots(res$rg, cohort = cohort, out_dir = plot_root, qc_tab = res$qc_tab)
+  render_qc_plots(rg, cohort = cohort_name, out_dir = cfg$qc_dir,
+                  subdir = "sample_qc", qc_tab = qc_tab)
 
-  rm(rg, res)
+  rm(rg, qc_tab)
   gc()
 }

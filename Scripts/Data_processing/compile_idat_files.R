@@ -25,8 +25,8 @@
 # ============================================================================
 
 library(minfi)
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/read_cohort_idats.R')
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/read_cohort_idats.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/cohort_config.R')
 
 cohorts <- select_cohorts(commandArgs(trailingOnly = TRUE))
 

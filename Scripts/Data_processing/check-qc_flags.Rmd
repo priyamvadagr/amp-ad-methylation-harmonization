@@ -4,9 +4,8 @@ subtitle: "Which ewastools control metrics drive control-only sample flags"
 author: ""
 date: "`r Sys.Date()`"
 output:
-  html_document:
+  pdf_document:
     toc: true
-    toc_float: true
     number_sections: true
 ---
 
@@ -16,22 +15,35 @@ knitr::opts_chunk$set(
   message = TRUE,
   warning = TRUE
 )
-options(width = 120)
+options(width = 80)
+
+# Force-wrap any output/message line too wide for the PDF page
+wrap_hook <- function(x, options) {
+  x <- strwrap(x, width = 80)
+  paste(x, collapse = "\n")
+}
+hook_output  <- knitr::knit_hooks$get("output")
+hook_message <- knitr::knit_hooks$get("message")
+
+knitr::knit_hooks$set(
+  output  = function(x, options) hook_output(wrap_hook(x, options), options),
+  message = function(x, options) hook_message(wrap_hook(x, options), options)
+)
 ```
 
-```{r helper}
+```{r helper, echo = FALSE}
 base_dir <- "/home/ec2-user/data/methyl_harmonization"
 
 ## Runs the control-only diagnostic for one cohort and returns a list of
 ## tables. `sample_qc.csv` and `<cohort>_ewastools.csv` live under
-## <base_dir>/<cohort>/qc/. Returns NULL (with a message) if the ewastools
+## <base_dir>/<cohort>/qc/sample_qc/. Returns NULL (with a message) if the ewastools
 ## CSV hasn't been generated yet, or if no sample has flag_reason == "control"
 ## exactly (control failure can also show up combined with other flags,
 ## e.g. "bisulfite;control" -- those are reported separately below, not
 ## counted as control-only).
 analyze_control_only <- function(cohort, base_dir) {
-  qc_csv <- file.path(base_dir, cohort, "qc", paste0(cohort, "_sample_qc.csv"))
-  ew_csv <- file.path(base_dir, cohort, "qc", paste0(cohort, "_ewastools.csv"))
+  qc_csv <- file.path(base_dir, cohort, "qc", "sample_qc", paste0(cohort, "_sample_qc.csv"))
+  ew_csv <- file.path(base_dir, cohort, "qc", "sample_qc", paste0(cohort, "_ewastools.csv"))
 
   if (!file.exists(qc_csv)) {
     message("[", cohort, "] missing sample_qc.csv: ", qc_csv)
@@ -113,8 +125,9 @@ print_results <- function(res) {
 res_rosmap <- analyze_control_only("ROSMAP", base_dir)
 print_results(res_rosmap)
 ```
-All flags (n=78) were driven by Non-polymorphic Green marginally below the Illumina cutoff (range 3.95–5.0) with no other QC failure, 
-consistent with a systematic control-probe artifact rather than sample failure.
+All flags (n=78) were driven by Non-polymorphic Green marginally below the Illumina cutoff 
+(range 3.95–5.0) with no other QC failure, consistent with a systematic control-probe 
+artifact rather than sample failure.
 
 # ROSMAP_APOE4
 

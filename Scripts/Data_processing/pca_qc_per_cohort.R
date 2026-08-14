@@ -11,8 +11,8 @@
 #   2. individual_csv      -> sex, race, ageDeath, Braak, apoe4Status, tissue
 #                             (matched on individualID; columns common to all
 #                             cohorts -- see COVARIATES below)
-# and writes <qc_dir>/<cohort>_pca.rds, _pca_scores.csv, _pca_varexplained.csv,
-# _pca_assoc.csv, _pca_qc.pdf.
+# and writes <qc_dir>/pca_qc/<cohort>_pca.rds, _pca_scores.csv,
+# _pca_varexplained.csv, _pca_assoc.csv, _pca_qc.pdf.
 #
 # Usage:
 #   Rscript pca_qc_per_cohort.R                    # all cohorts
@@ -26,11 +26,11 @@
 # drift apart.
 # ============================================================================
 
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/pca_qc.R')
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/pca_qc.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/cohort_config.R')
 
 # Where pca_qc() ALSO copies each cohort's _pca_qc.pdf (data files stay in
-# qc_dir); mirrors render_qc_plots()'s Results/QC/<subfolder>/<cohort>/ layout.
+# qc_dir/pca_qc); mirrors render_qc_plots()'s Results/QC/<subfolder>/<cohort>/ layout.
 plot_root <- '/home/ec2-user/AMP-AD_methylation_harmonization/Results/QC/PCA'
 
 # technical (from the idat manifest) + biological (from individual metadata)
@@ -103,7 +103,7 @@ for (cohort_name in names(cohorts)) {
 
   color_by <- intersect(COLOR_BY, covariates)
 
-  dir.create(cfg$qc_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(file.path(cfg$qc_dir, "pca_qc"), recursive = TRUE, showWarnings = FALSE)
   res <- pca_qc(beta, pheno,
                sample_col   = "sample",
                covariates   = covariates,
@@ -111,7 +111,7 @@ for (cohort_name in names(cohorts)) {
                n_top        = n_top,
                n_pcs        = n_pcs,
                r2_flag      = r2_flag,
-               out_prefix   = file.path(cfg$qc_dir, cohort_name),
+               out_prefix   = file.path(cfg$qc_dir, "pca_qc", cohort_name),
                plot_dir     = plot_root)
 
   print(res$assoc_r2)

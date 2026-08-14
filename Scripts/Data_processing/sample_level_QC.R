@@ -45,8 +45,8 @@
 # ============================================================================
 
 library(minfi)
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/sample_qc.R')
-source('/home/ec2-user/AMP-AD_methylation_harmonization/R/cohort_config.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/sample_qc.R')
+source('/home/ec2-user/AMP-AD_methylation_harmonization/Scripts/functions/cohort_config.R')
 
 # Attach reported sex onto pData(rg) from the cohort's processed individual
 # metadata, matched on individualID.
@@ -82,7 +82,7 @@ cohorts <- select_cohorts(requested)
 
 # --- per-phase workers ------------------------------------------------------
 
-# ewastools phase: read raw idats (chunked) -> <qc_dir>/<cohort>_ewastools.csv.
+# ewastools phase: read raw idats (chunked) -> <qc_dir>/sample_qc/<cohort>_ewastools.csv.
 run_ewastools_phase <- function(cohort_name, cfg) {
   cat("\n==== ", cohort_name, " [ewastools] ====\n")
   manifest <- read.csv(cfg$manifest, stringsAsFactors = FALSE)
@@ -90,14 +90,14 @@ run_ewastools_phase <- function(cohort_name, cfg) {
                raw_dir   = cfg$raw_dir,
                grn_col   = "grnFile",
                chunk_size = chunk_sz,
-               out_csv   = file.path(cfg$qc_dir, paste0(cohort_name, "_ewastools.csv")))
+               out_csv   = file.path(cfg$qc_dir, "sample_qc", paste0(cohort_name, "_ewastools.csv")))
   rm(manifest); gc()
 }
 
 # minfi phase: load rg -> minfi QC + merge ewastools CSV -> figures + save.
 run_minfi_phase <- function(cohort_name, cfg) {
   cat("\n==== ", cohort_name, " [minfi] ====\n")
-  out_prefix <- file.path(cfg$qc_dir, cohort_name)
+  out_prefix <- file.path(cfg$qc_dir, "sample_qc", cohort_name)
   ew_csv     <- paste0(out_prefix, "_ewastools.csv")
   if (!file.exists(ew_csv))
     warning("[", cohort_name, "] no ewastools CSV (", ew_csv,
