@@ -34,5 +34,4 @@ Cohort-specific file paths (raw data, manifests, QC/normalized output directorie
 
 R dependencies are managed with [`renv`](https://rstudio.github.io/renv/); `renv::restore()` will install the pinned package versions from `renv.lock`. Running the CorticalClock scripts additionally requires the [CorticalClock](https://github.com/gemmashireby/CorticalClock) repository to be downloaded separately.
 Zhou mask tables can be downloaded from:
-https://raw.githubusercontent.com/zhou-lab/InfiniumAnnotationData/main/Anno/HM450/HM450.hg19.manifest.pop.tsv.gz
-https://raw.githubusercontent.com/zhou-lab/InfiniumAnnotationData/main/Anno/EPIC/EPIC.hg19.manifest.pop.tsv.gz
+[HM450.hg19.manifest.pop.tsv.gz](https://raw.githubusercontent.com/zhou-lab/InfiniumAnnotationData/main/Anno/HM450/HM450.hg19.manifest.pop.tsv.gz) and [EPIC.hg19.manifest.pop.tsv.gz](https://raw.githubusercontent.com/zhou-lab/InfiniumAnnotationData/main/Anno/EPIC/EPIC.hg19.manifest.pop.tsv.gz)
